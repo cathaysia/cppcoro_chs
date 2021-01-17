@@ -10,5 +10,5 @@ jobs:
     - uses: actions/checkout@v1
     - uses: ammaraskar/sphinx-action@master
       with:
-        docs-folder: "./source/"
+        docs-folder: "./"
         build-command: "sphinx-build -b html . build"

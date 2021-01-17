@@ -1,4 +1,3 @@
 /.mypy_cache/
 /.vscode/
-/build/
-/*/_build/
+/_build/
