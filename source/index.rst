@@ -146,9 +146,9 @@ API 概览：
 shared_task<T>
 ========================================
 
-协程类 ``shared_task<T>`` 以异步的方式产生单个值。
+协程类 ``shared_task<T>`` 以异步、惰性的方式产生单个值。
 
-它也是 **延迟计算** ，仅当有协程 await 它的时候才开始执行计算。
+所谓 **惰性**，就是指仅当有协程 await 它的时候才开始执行计算。
 
 它是 **共享** 的：task 允许被拷贝； task 的返回值可以被多次引用； task 可以被多个协程 await。
 
@@ -222,7 +222,7 @@ const 限定的函数可以安全地在多个线程中调用，是线程安全�
 gengrator<T>
 ========================================
 
-一个 ``gengrator`` 用于产生一系列类型为 T 的值。值的产生是延迟计算和异步的。
+一个 :abbr:`生成器 (Gengrator)` 用于产生一系列类型为 T 的值。值的产生是惰性和异步的。
 
 协程可以使用 ``co_yield`` 来产生一个类型为 T 的值。但是协程内无法使用 co_await 关键字。值的产生必须是同步的。
 
@@ -322,8 +322,142 @@ API 摘要:
 recursive_generator<T>
 ========================================
 
+相比生成器而言， :abbr:`递归生成器 (Recursive Generator)` 能够生成嵌套在外部元素的序列。
+
+``co_yield`` 除了可以生成类型 T 的元素外，还能生成一个元素为 T 的递归生成器。
+
+当你 ``co_yield`` 一个递归生成器时，其将被作为当前元素的子元素。当前线程将被挂起，直至递归生成器的所有元素被生成。然后被恢复，等待请求下一个元素。
+
+相比普通生成器而言，在迭代嵌套数据结构时，递归生成器能够通过 ``iterator::operator++()`` 直接恢复边缘协程以产生下一个元素，而不必未每个元素都暂停/恢复一个 O(depth) 的协程。缺点是有额外开销。
+
+例如：
+
+.. code-block:: cpp
+
+   // 列出当前目录的内容
+   cppcoro::generator<dir_entry> list_directory(std::filesystem::path path);
+
+   cppcoro::recursive_generator<dir_entry> list_directory_recursive(std::filesystem::path path)
+   {
+   for (auto& entry : list_directory(path))
+   {
+      co_yield entry;
+      if (entry.is_directory())
+      {
+         co_yield list_directory_recursive(entry.path());
+      }
+   }
+   }
+
+.. important::
+
+   对 ``recursive_generator<T>`` 应用 ``fmap()`` 操作时，将产生 ``generator<U>`` 类型，而不是 ``recursive_generator<U>`` 类型。这是因为通常在递归上下文中不使用 ``fmap`` 操作，我们避免递归生成器的格外开销。
+
 async_generator<T>
 ========================================
+
+:abbr:`异步生成器 (Async Generator)` 用于产生类型为 T 的序列。值是惰性、异步产生的。
+
+此协程体内既可以使用 ``co_wait`` 也可以使用 ``co_yield``
+
+可以通过基于 ``for co_await`` 来处理数据序列。
+
+比如：
+
+.. code-block:: cpp
+
+   cppcoro::async_generator<int> ticker(int count, threadpool& tp)
+   {
+   for (int i = 0; i < count; ++i)
+   {
+      co_await tp.delay(std::chrono::seconds(1));
+      co_yield i;
+   }
+   }
+
+   cppcoro::task<> consumer(threadpool& tp)
+   {
+   auto sequence = ticker(10, tp);
+   for co_await(std::uint32_t i : sequence)
+   {
+      std::cout << "Tick " << i << std::endl;
+   }
+   }
+
+API 摘要:
+
+.. code-block:: cpp
+
+   // <cppcoro/async_generator.hpp>
+   namespace cppcoro
+   {
+   template<typename T>
+   class async_generator
+   {
+   public:
+
+      class iterator
+      {
+      public:
+         using iterator_tag = std::forward_iterator_tag;
+         using difference_type = std::size_t;
+         using value_type = std::remove_reference_t<T>;
+         using reference = value_type&;
+         using pointer = value_type*;
+
+         iterator(const iterator& other) noexcept;
+         iterator& operator=(const iterator& other) noexcept;
+
+         // 如果协程被挂起，则恢复它
+         // 返回一个 operation ，其必须被 await 至自增操作结束
+         // 最后返回的迭代器与 end() 相等
+         // 若有未捕获异常，则将其抛出
+         Awaitable<iterator&> operator++() noexcept;
+
+         // 对迭代器解引用
+         pointer operator->() const noexcept;
+         reference operator*() const noexcept;
+
+         bool operator==(const iterator& other) const noexcept;
+         bool operator!=(const iterator& other) const noexcept;
+      };
+
+      // 构造一个空的序列
+      async_generator() noexcept;
+      async_generator(const async_generator&) = delete;
+      async_generator(async_generator&& other) noexcept;
+      ~async_generator();
+
+      async_generator& operator=(const async_generator&) = delete;
+      async_generator& operator=(async_generator&& other) noexcept;
+
+      void swap(async_generator& other) noexcept;
+
+      // 开始执行协程并返回起一个 operation，其必须被 await 至第一个元素可用
+      // co_wait 获得的是一个迭代器对象，并且可用其来推动协程的执行
+      // 在协程执行结束后，调用此函数是非法的
+      Awaitable<iterator> begin() noexcept;
+      iterator end() noexcept;
+
+   };
+
+   template<typename T>
+   void swap(async_generator<T>& a, async_generator<T>& b);
+
+   // 以 source 为基础，对其每个元素调用一次 func 来产生一个新的序列。
+   template<typename FUNC, typename T>
+   async_generator<std::invoke_result_t<FUNC, T&>> fmap(FUNC func, async_generator<T> source);
+   }
+
+.. important:: 
+
+   异步迭代器的提前终止：
+
+   当异步生成器被析构时，它将请求取消协程。如果协程已经运行结束，或者在 ``co_yield`` 表达式中挂起，那么协程立即被销毁。否则协程将继续执行，直到它运行结束或到达下一个 ``co_yield`` 表达式。
+
+   在协程被销毁时，其作用于内的所有变量也将被销毁，以确保完全清理资源。
+
+   在协程使用 ``co_await`` 等待下一个元素时，调用者必须确保此时异步生成器不被销毁。
 
 异步类型
 ****************************************
@@ -337,6 +471,87 @@ single_consumer_async_auto_reset_event
 
 async_mutex
 ========================================
+
+提供了一个简单的互斥抽象，允许调用者在协程中 ``co_await`` 互斥锁，挂起协程，直到获得互斥锁。
+
+这个实现是无锁的，因为等待互斥锁的协程不会阻塞线程，而是挂起协程，然后前一个锁持有者通过调用 unlock() 来恢复它。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/async_mutex.hpp>
+   namespace cppcoro
+   {
+   class async_mutex_lock;
+   class async_mutex_lock_operation;
+   class async_mutex_scoped_lock_operation;
+
+   class async_mutex
+   {
+   public:
+      async_mutex() noexcept;
+      ~async_mutex();
+
+      async_mutex(const async_mutex&) = delete;
+      async_mutex& operator(const async_mutex&) = delete;
+
+      bool try_lock() noexcept;
+      async_mutex_lock_operation lock_async() noexcept;
+      async_mutex_scoped_lock_operation scoped_lock_async() noexcept;
+      void unlock();
+   };
+
+   class async_mutex_lock_operation
+   {
+   public:
+      bool await_ready() const noexcept;
+      bool await_suspend(std::experimental::coroutine_handle<> awaiter) noexcept;
+      void await_resume() const noexcept;
+   };
+
+   class async_mutex_scoped_lock_operation
+   {
+   public:
+      bool await_ready() const noexcept;
+      bool await_suspend(std::experimental::coroutine_handle<> awaiter) noexcept;
+      [[nodiscard]] async_mutex_lock await_resume() const noexcept;
+   };
+
+   class async_mutex_lock
+   {
+   public:
+      // 获得锁的所有权
+      async_mutex_lock(async_mutex& mutex, std::adopt_lock_t) noexcept;
+
+      // 移交锁的所有权
+      async_mutex_lock(async_mutex_lock&& other) noexcept;
+
+      async_mutex_lock(const async_mutex_lock&) = delete;
+      async_mutex_lock& operator=(const async_mutex_lock&) = delete;
+
+      // 通过调用 unlock() 来解锁
+      ~async_mutex_lock();
+   };
+   }
+
+例如：
+
+.. code-block:: cpp
+
+   #include <cppcoro/async_mutex.hpp>
+   #include <cppcoro/task.hpp>
+   #include <set>
+   #include <string>
+
+   cppcoro::async_mutex mutex;
+   std::set<std::string> values;
+
+   cppcoro::task<> add_item(std::string value)
+   {
+   cppcoro::async_mutex_lock lock = co_await mutex.scoped_lock_async();
+   values.insert(std::move(value));
+   }
 
 async_manual_reset_event
 ========================================
@@ -428,10 +643,11 @@ Awaiter<T>
 Scheduler
 ========================================
 DelayedScheduler
-
+========================================
 
 Indices and tables
-==================
+****************************************
+
 
 * :ref:`genindex`
 * :ref:`modindex`
