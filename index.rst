@@ -462,9 +462,55 @@ API 摘要:
 异步类型
 ****************************************
 
-
 single_consumer_event
 ========================================
+
+这是一个简单的手动重置事件类型。其在同一时间内只能被一个协程等待。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/single_consumer_event.hpp>
+   namespace cppcoro
+   {
+   class single_consumer_event
+   {
+   public:
+      single_consumer_event(bool initiallySet = false) noexcept;
+      bool is_set() const noexcept;
+      void set();
+      void reset() noexcept;
+      Awaiter<void> operator co_await() const noexcept;
+   };
+   }
+
+例子：
+
+.. code-block:: cpp
+
+   #include <cppcoro/single_consumer_event.hpp>
+
+   cppcoro::single_consumer_event event;
+   std::string value;
+
+   cppcoro::task<> consumer()
+   {
+   // 协程将会在此处挂起，直至有线程调用 event.set()
+   // 比如下面的 producer() 函数
+   co_await event;
+
+   std::cout << value << std::endl;
+   }
+
+   void producer()
+   {
+   value = "foo";
+
+   // This will resume the consumer() coroutine inside the call to set()
+   // if it is currently suspended.
+   event.set();
+   }
 
 single_consumer_async_auto_reset_event
 ========================================
@@ -562,8 +608,80 @@ async_auto_reset_event
 async_latch
 ========================================
 
+:abbr:`异步锁存器 (Async Latch)` 是一个同步原语，用于异步等待一个计数器递减为零。
+
+此锁存器是一次性的。一旦由于计数器变为零导致锁存器进入 ready 状态，其将保持此状态直至销毁。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/async_latch.hpp>
+   namespace cppcoro
+   {
+   class async_latch
+   {
+   public:
+
+      // 用指定的计数初始化此锁存器
+      async_latch(std::ptrdiff_t initialCount) noexcept;
+
+      // 查询计数是否已经变为零
+      bool is_ready() const noexcept;
+
+      // 将计数减少 n
+      // 当此函数的调用导致计数为零时，所有等待的协程将被恢复
+      // 计数器减到负值是未定义行为
+      void count_down(std::ptrdiff_t n = 1) noexcept;
+
+      // 等待锁存器状态变为 ready
+      // 如果计数没有变为零，则所有等待的协程将被挂起，直至由于调用 count_down() 导致计数变为零。
+      // 如果计数已经变为零，则不会被挂起
+      Awaiter<void> operator co_await() const noexcept;
+
+   };
+   }
+
 sequence_barrier
 ========================================
+
+:abbr:`顺序墙 (Sequence Barrier)` 是一个同步原语，允许一个生产者和多个消费者之间通过一个单调递增的数字序列来协作。
+
+生产者通过发布一组单调递增的数来推进序列，消费者则可以查询生产者最后发布的数，并可以等待至特定的数被发布。
+
+顺序墙可以充当线程安全的生产-消费环形缓存区的游标。
+
+有关更多信息，参见 LMAX Disruptor 模式：https://lmax-exchange.github.io/disruptor/files/Disruptor-1.0.pdf
+
+API 摘要：
+
+.. code-block:: cpp
+
+   namespace cppcoro
+   {
+   template<typename SEQUENCE = std::size_t,
+            typename TRAITS = sequence_traits<SEQUENCE>>
+   class sequence_barrier
+   {
+   public:
+      sequence_barrier(SEQUENCE initialSequence = TRAITS::initial_sequence) noexcept;
+      ~sequence_barrier();
+
+      SEQUENCE last_published() const noexcept;
+
+      // 等待至序列号 targetSequence 被发布
+      //
+      // 如果操作没有同步地完成，则等待的协程将被特定的 scheduler 唤醒。否则协程将直接顺序执行而无需等待
+      //
+      // co_await 表达式将在 last_published() 后被唤醒，最后发布的数就是其 targetSequence
+      template<typename SCHEDULER>
+      [[nodiscard]]
+      Awaitable<SEQUENCE> wait_until_published(SEQUENCE targetSequence,
+                                                SCHEDULER& scheduler) const noexcept;
+
+      void publish(SEQUENCE sequence) noexcept;
+   };
+   }
 
 multi_producer_sequencer
 ========================================
@@ -608,8 +726,9 @@ io_service and io_work_scope
 ========================================
 file, readable_file, writable_file
 ========================================
+
 read_only_file, write_only_file, read_write_file
-========================================
+==================================================
 
 网络
 ****************************************
@@ -620,7 +739,7 @@ socket
 ip_address, ipv4_address, ipv6_address
 ========================================
 ip_endpoint, ipv4_endpoint, ipv6_endpoint
-========================================
+==========================================
 
 元函数
 ****************************************
