@@ -154,7 +154,7 @@ shared_task<T>
 
 它在第一次被 co_await 时执行，其余 await 的协程要么挂起进入等待队列，要么直接拿到已经计算的结果。
 
-如果协程由于 await task 被挂起，那么其将会在 task 完成计算后被恢复。task 要么 ``co_return`` 一个值，要么抛出一个未捕获的异常。
+如果协程由于 await task 被挂起，那么其将会在 task 完成计算后被唤醒。task 要么 ``co_return`` 一个值，要么抛出一个未捕获的异常。
 
 API 摘要:
 
@@ -217,7 +217,7 @@ const 限定的函数可以安全地在多个线程中调用，是线程安全�
 
    - 都是延迟计算：计算只在被 co_await 后才开始。
    - task<T> 的结果不允许被拷贝，是仅移动的。而 shared_task 可以被拷贝和移动
-   - 由于可能被共享，shared_task 的结果总是左值，这可能导致局部变量无法进行“移动构造”，而且由于需要维护引用计数，其运行时成本略高。
+   - 由于可能被共享，shared_task 的结果总是左值，这可能导致局部变量无法进行'移动构造'，而且由于需要维护引用计数，其运行时成本略高。
 
 gengrator<T>
 ========================================
@@ -251,7 +251,7 @@ gengrator<T>
 
 当一个返回值为``generator<T>`` 的协程函数被调用后，其会被立即挂起。直到 ``generator<T>::begin()`` 函数被调用。在 ``co_yield`` 达到终点或者协程完成后不在产生值。
 
-如果返回的迭代器与 ``end()`` 不相等，那么对迭代器进行解引用将会返回“传递给 ``co_yield`` ”的值。
+如果返回的迭代器与 ``end()`` 不相等，那么对迭代器进行解引用将会返回'传递给 ``co_yield`` '的值。
 
 调用 ``operator()++`` 将会恢复协程的运行，直至协程结束或 co_yield 不再产生新的值。
 
@@ -326,11 +326,11 @@ recursive_generator<T>
 
 ``co_yield`` 除了可以生成类型 T 的元素外，还能生成一个元素为 T 的递归生成器。
 
-当你 ``co_yield`` 一个递归生成器时，其将被作为当前元素的子元素。当前线程将被挂起，直至递归生成器的所有元素被生成。然后被恢复，等待请求下一个元素。
+当你 ``co_yield`` 一个递归生成器时，其将被作为当前元素的子元素。当前线程将被挂起，直至递归生成器的所有元素被生成。然后被唤醒，等待请求下一个元素。
 
-相比普通生成器而言，在迭代嵌套数据结构时，递归生成器能够通过 ``iterator::operator++()`` 直接恢复边缘协程以产生下一个元素，而不必未每个元素都暂停/恢复一个 O(depth) 的协程。缺点是有额外开销。
+相比普通生成器而言，在迭代嵌套数据结构时，递归生成器能够通过 ``iterator::operator++()`` 直接唤醒边缘协程以产生下一个元素，而不必未每个元素都暂停/唤醒一个 O(depth) 的协程。缺点是有额外开销。
 
-例如：
+例子：
 
 .. code-block:: cpp
 
@@ -408,7 +408,7 @@ API 摘要:
          iterator(const iterator& other) noexcept;
          iterator& operator=(const iterator& other) noexcept;
 
-         // 如果协程被挂起，则恢复它
+         // 如果协程被挂起，则唤醒它
          // 返回一个 operation ，其必须被 await 至自增操作结束
          // 最后返回的迭代器与 end() 相等
          // 若有未捕获异常，则将其抛出
@@ -515,12 +515,69 @@ API 摘要：
 single_consumer_async_auto_reset_event
 ========================================
 
+这个类提供了一个异步同步原语以允许单个协程等待事件至信号发射。信号可以通过调用 ``set()`` 函数被发射。
+
+一旦等待事件的协程被前面或后面对 ``set()`` 的调用释放，事件就会自动重置回 'not set' 状态。
+
+相比 ``async_auto_reset_event`` 而言，本类更有效率，本类在同一时间仅允许一个类进入等待状态。如果你需要多个协程在同一时间等待时间，请使用 ``async_auto_reset_event`` 。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/single_consumer_async_auto_reset_event.hpp>
+   namespace cppcoro
+   {
+   class single_consumer_async_auto_reset_event
+   {
+   public:
+
+      single_consumer_async_auto_reset_event(
+         bool initiallySet = false) noexcept;
+
+      // 将事件的状态改为 'set' 。等待此事件的协程将被立即唤醒，之后事件状态自动重置为 'not set'
+      void set() noexcept;
+
+      // Returns an Awaitable type that can be awaited to wait until
+      // the event becomes 'set' via a call to the .set() method. If
+      // the event is already in the 'set' state then the coroutine
+      // continues without suspending.
+      // The event is automatically reset back to the 'not set' state
+      // before resuming the coroutine.
+      Awaiter<void> operator co_await() const noexcept;
+
+   };
+   }
+
+例子:
+
+.. code-block:: cpp
+
+   std::atomic<int> value;
+   cppcoro::single_consumer_async_auto_reset_event valueDecreasedEvent;
+
+   cppcoro::task<> wait_until_value_is_below(int limit)
+   {
+   while (value.load(std::memory_order_relaxed) >= limit)
+   {
+      // 在此等待至 valueDecreasedEvent 事件的状态变为 set
+      co_await valueDecreasedEvent;
+   }
+   }
+
+   void change_value(int delta)
+   {
+   value.fetch_add(delta, std::memory_order_relaxed);
+   // 如果此处 valueDecreasedEvent 状态发生改变，则通知挂起的协程
+   if (delta < 0) valueDecreasedEvent.set();
+   }
+
 async_mutex
 ========================================
 
 提供了一个简单的互斥抽象，允许调用者在协程中 ``co_await`` 互斥锁，挂起协程，直到获得互斥锁。
 
-这个实现是无锁的，因为等待互斥锁的协程不会阻塞线程，而是挂起协程，然后前一个锁持有者通过调用 unlock() 来恢复它。
+这个实现是无锁的，因为等待互斥锁的协程不会阻塞线程，而是挂起协程，然后前一个锁持有者通过调用 unlock() 来唤醒它。
 
 API 摘要：
 
@@ -581,7 +638,7 @@ API 摘要：
    };
    }
 
-例如：
+例子：
 
 .. code-block:: cpp
 
@@ -602,8 +659,148 @@ API 摘要：
 async_manual_reset_event
 ========================================
 
+一个手动重置的事件，是一个 协程/线程 同步原语。其允许多个协程进入等待状态，直至事件通过调用 ``set()`` 函数改变状态。
+
+此事件永源处于 'set' 或 'not set' 状态之一。
+
+如果协程在等待前事件已经是 'set' 状态，那么协程不会进入等待状态。否则，协程将会被挂起，直至事件状态通过 ``set()`` 函数被更换为 'set' 。
+
+当事件状态改变为 'set' 时，所有由于等待事件被挂起的线程都会被某个线程唤醒。
+
+.. important:: 
+
+   请注意，当事件被销毁时，必须确保没有协程由于等待事件被挂起，因为它们将永远不会被唤醒。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   namespace cppcoro
+   {
+   class async_manual_reset_event_operation;
+
+   class async_manual_reset_event
+   {
+   public:
+      async_manual_reset_event(bool initiallySet = false) noexcept;
+      ~async_manual_reset_event();
+
+      async_manual_reset_event(const async_manual_reset_event&) = delete;
+      async_manual_reset_event(async_manual_reset_event&&) = delete;
+      async_manual_reset_event& operator=(const async_manual_reset_event&) = delete;
+      async_manual_reset_event& operator=(async_manual_reset_event&&) = delete;
+
+      // Wait until the event becomes set.
+      async_manual_reset_event_operation operator co_await() const noexcept;
+
+      bool is_set() const noexcept;
+
+      void set() noexcept;
+
+      void reset() noexcept;
+
+   };
+
+   class async_manual_reset_event_operation
+   {
+   public:
+      async_manual_reset_event_operation(async_manual_reset_event& event) noexcept;
+
+      bool await_ready() const noexcept;
+      bool await_suspend(std::experimental::coroutine_handle<> awaiter) noexcept;
+      void await_resume() const noexcept;
+   };
+   }
+
+例子：
+
+.. code-block:: cpp
+
+   cppcoro::async_manual_reset_event event;
+   std::string value;
+
+   void producer()
+   {
+   value = get_some_string_value();
+
+   // 通过设置事件来发布一个值
+   event.set();
+   }
+
+   // 能够被调用多次以产生多个 task
+   // 所有的 consumer task 将会等待至值被发布
+   cppcoro::task<> consumer()
+   {
+   // 等待至值被事件发布
+   co_await event;
+
+   consume_value(value);
+   }
+
 async_auto_reset_event
 ========================================
+
+一个手动重置的事件，是一个 协程/线程 同步原语。其允许多个协程进入等待状态，直至事件通过调用 ``set()`` 函数改变状态。
+
+一旦由于等待事件被挂起的线程被唤醒，则事件自动进入 'not set' 状态。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/async_auto_reset_event.hpp>
+   namespace cppcoro
+   {
+   class async_auto_reset_event_operation;
+
+   class async_auto_reset_event
+   {
+   public:
+
+      async_auto_reset_event(bool initiallySet = false) noexcept;
+
+      ~async_auto_reset_event();
+
+      async_auto_reset_event(const async_auto_reset_event&) = delete;
+      async_auto_reset_event(async_auto_reset_event&&) = delete;
+      async_auto_reset_event& operator=(const async_auto_reset_event&) = delete;
+      async_auto_reset_event& operator=(async_auto_reset_event&&) = delete;
+
+      // 等待至事件进入 'set' 状态
+      // 
+      // 如果事件已经是 'set' 状态了，则事件自动进入 'not set' 状态，而且 await 的协程
+      // 会继续执行而不是挂起。
+      // 否则，协程将被挂起至一些线程调用 'set()' 函数
+      //
+      // 注意：挂起的线程可因 'set()' 调用或者其他线程调用 'operator co_await()' 而被唤醒。
+      async_auto_reset_event_operation operator co_await() const noexcept;
+
+      // 将事件的状态更改为 'set'
+      //
+      // 如果有因等待事件被挂起的协程，则其中之一会被唤醒，然后事件自动进入 'not set' 状态
+      //
+      // 如果事件已经为 'set' 状态，则此函数不进行任何操作。
+      void set() noexcept;
+
+      // 设置事件状态为 'not set'
+      //
+      // 如果事件已经为 'not set' 状态，则此函数不进行任何操作。
+      void reset() noexcept;
+
+   };
+
+   class async_auto_reset_event_operation
+   {
+   public:
+      explicit async_auto_reset_event_operation(async_auto_reset_event& event) noexcept;
+      async_auto_reset_event_operation(const async_auto_reset_event_operation& other) noexcept;
+
+      bool await_ready() const noexcept;
+      bool await_suspend(std::experimental::coroutine_handle<> awaiter) noexcept;
+      void await_resume() const noexcept;
+
+   };
+   }
 
 async_latch
 ========================================
@@ -630,7 +827,7 @@ API 摘要：
       bool is_ready() const noexcept;
 
       // 将计数减少 n
-      // 当此函数的调用导致计数为零时，所有等待的协程将被恢复
+      // 当此函数的调用导致计数为零时，所有等待的协程将被唤醒
       // 计数器减到负值是未定义行为
       void count_down(std::ptrdiff_t n = 1) noexcept;
 
@@ -683,38 +880,221 @@ API 摘要：
    };
    }
 
-multi_producer_sequencer
-========================================
-
 single_producer_sequencer
 ========================================
 
-函数
-****************************************
+:abbr:`单消费者序列起 (Single Producer Sequencer)` 是一个同步原语，可以协调单个生产者和多个消费者对环状缓冲区的访问。
 
-sync_wait()
+生产者首先向环状缓冲区请求一个或多个槽，然后在槽内写入数据，最终发布这些槽的序列号。生产的数据和未消费的数据之和应小于 bufferSize
+
+消费者等待某些元素的发布，处理这些元素，然后通过发布在 sequence_barrier_ 对象中完成消费的序列号来通知生产者完成了对这些元素的处理。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/single_producer_sequencer.hpp>
+   namespace cppcoro
+   {
+   template<
+      typename SEQUENCE = std::size_t,
+      typename TRAITS = sequence_traits<SEQUENCE>>
+   class single_producer_sequencer
+   {
+   public:
+      using size_type = typename sequence_range<SEQUENCE, TRAITS>::size_type;
+
+      single_producer_sequencer(
+         const sequence_barrier<SEQUENCE, TRAITS>& consumerBarrier,
+         std::size_t bufferSize,
+         SEQUENCE initialSequence = TRAITS::initial_sequence) noexcept;
+
+      // 生产者 API:
+
+      template<typename SCHEDULER>
+      [[nodiscard]]
+      Awaitable<SEQUENCE> claim_one(SCHEDULER& scheduler) noexcept;
+
+      template<typename SCHEDULER>
+      [[nodiscard]]
+      Awaitable<sequence_range<SEQUENCE>> claim_up_to(
+         std::size_t count,
+         SCHEDULER& scheduler) noexcept;
+
+      void publish(SEQUENCE sequence) noexcept;
+
+      // 消费者 API:
+
+      SEQUENCE last_published() const noexcept;
+
+      template<typename SCHEDULER>
+      [[nodiscard]]
+      Awaitable<SEQUENCE> wait_until_published(
+         SEQUENCE targetSequence,
+         SCHEDULER& scheduler) const noexcept;
+
+   };
+   }
+
+例子：
+
+.. code-block:: cpp
+
+   using namespace cppcoro;
+   using namespace std::chrono;
+
+   struct message
+   {
+   int id;
+   steady_clock::time_point timestamp;
+   float data;
+   };
+
+   constexpr size_t bufferSize = 16384; // 必须为 2 的幂
+   constexpr size_t indexMask = bufferSize - 1;
+   message buffer[bufferSize];
+
+   task<void> producer(
+   io_service& ioSvc,
+   single_producer_sequencer<size_t>& sequencer)
+   {
+   auto start = steady_clock::now();
+   for (int i = 0; i < 1'000'000; ++i)
+   {
+      // 等待缓冲区内一个可用的槽
+      size_t seq = co_await sequencer.claim_one(ioSvc);
+
+      // 填充数据
+      auto& msg = buffer[seq & indexMask];
+      msg.id = i;
+      msg.timestamp = steady_clock::now();
+      msg.data = 123;
+
+      // 发布数据
+      sequencer.publish(seq);
+   }
+
+   // 发布终止序列号
+   auto seq = co_await sequencer.claim_one(ioSvc);
+   auto& msg = buffer[seq & indexMask];
+   msg.id = -1;
+   sequencer.publish(seq);
+   }
+
+   task<void> consumer(
+   static_thread_pool& threadPool,
+   const single_producer_sequencer<size_t>& sequencer,
+   sequence_barrier<size_t>& consumerBarrier)
+   {
+   size_t nextToRead = 0;
+   while (true)
+   {
+      // 等待只下一个数据可用
+      // 也许有多个数据可用
+      const size_t available = co_await sequencer.wait_until_published(nextToRead, threadPool);
+      do {
+         auto& msg = buffer[nextToRead & indexMask];
+         if (msg.id == -1)
+         {
+         consumerBarrier.publish(nextToRead);
+         co_return;
+         }
+
+         processMessage(msg);
+      } while (nextToRead++ != available);
+
+      // 通知生产者我们已经处理到了 'nextToRead - 1'
+      consumerBarrier.publish(available);
+   }
+   }
+
+   task<void> example(io_service& ioSvc, static_thread_pool& threadPool)
+   {
+   sequence_barrier<size_t> barrier;
+   single_producer_sequencer<size_t> sequencer{barrier, bufferSize};
+
+   co_await when_all(
+      producer(tp, sequencer),
+      consumer(tp, sequencer, barrier));
+   }
+
+multi_producer_sequencer
 ========================================
-when_all()
-========================================
-when_all_ready()
-========================================
-fmap()
-========================================
-schedule_on()
-========================================
-resume_on()
-========================================
+
+:abbr:`多生产序列器 (Multi Producer Sequencer)`  是一个同步原语，可以协调多个生产者和消费者之间对环状缓冲区的访问。
+
+对于单个生产者的变体，请参阅 single_producer_sequencer_ 
+
+.. important:: 
+
+   环状缓冲区的大小必须为 2 的幂。这是因为此算法实现使用了位掩码来计算缓冲区的偏移值，而不是使用摸运算。而且，这允许序列号被 32/64位值包装。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/multi_producer_sequencer.hpp>
+   namespace cppcoro
+   {
+   template<typename SEQUENCE = std::size_t,
+            typename TRAITS = sequence_traits<SEQUENCE>>
+   class multi_producer_sequencer
+   {
+   public:
+      multi_producer_sequencer(
+         const sequence_barrier<SEQUENCE, TRAITS>& consumerBarrier,
+         SEQUENCE initialSequence = TRAITS::initial_sequence);
+
+      std::size_t buffer_size() const noexcept;
+
+      // 消费者接口
+      //
+      // 每个消费者保持对他们独一的 'lastKnownPublished' 的追踪。并且需要传递 this 到
+      // 此方法，以便于查询最后升级的、可用的序列号
+      // Consumer interface
+
+      SEQUENCE last_published_after(SEQUENCE lastKnownPublished) const noexcept;
+
+      template<typename SCHEDULER>
+      Awaitable<SEQUENCE> wait_until_published(
+         SEQUENCE targetSequence,
+         SEQUENCE lastKnownPublished,
+         SCHEDULER& scheduler) const noexcept;
+
+      // 生产者接口
+
+      // 查询是否有可用的空间（近似值）
+      bool any_available() const noexcept;
+
+      template<typename SCHEDULER>
+      Awaitable<SEQUENCE> claim_one(SCHEDULER& scheduler) noexcept;
+
+      template<typename SCHEDULER>
+      Awaitable<sequence_range<SEQUENCE, TRAITS>> claim_up_to(
+         std::size_t count,
+         SCHEDULER& scheduler) noexcept;
+
+      // 标记这个特定的序列号为已发布
+      void publish(SEQUENCE sequence) noexcept;
+
+      // 标记范围内的序列号为已发布
+      void publish(const sequence_range<SEQUENCE, TRAITS>& range) noexcept;
+   };
+   }
+
 
 撤销
 ****************************************
 
-
 cancellation_token
 ========================================
+
+
 cancellation_source
 ========================================
 cancellation_registration
 ========================================
+
 
 I/O 调度
 ****************************************
@@ -733,13 +1113,441 @@ read_only_file, write_only_file, read_write_file
 网络
 ****************************************
 
+注意:目前仅支持 Windows 平台上的网络抽象。Linux 支持将会在稍后推出。
 
 socket
 ========================================
+
+套接字类可用于通过网络异步发送/接收数据
+
+当前只支持 IPv4 和 IPv6 上的 TCP/IP, UDP/IP 协议。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/net/socket.hpp>
+   namespace cppcoro::net
+   {
+   class socket
+   {
+   public:
+
+      static socket create_tcpv4(ip_service& ioSvc);
+      static socket create_tcpv6(ip_service& ioSvc);
+      static socket create_updv4(ip_service& ioSvc);
+      static socket create_udpv6(ip_service& ioSvc);
+
+      socket(socket&& other) noexcept;
+
+      ~socket();
+
+      socket& operator=(socket&& other) noexcept;
+
+      // 返回套接字的平台相关的原声句柄
+      <platform-specific> native_handle() noexcept;
+
+      const ip_endpoint& local_endpoint() const noexcept;
+      const ip_endpoint& remote_endpoint() const noexcept;
+
+      void bind(const ip_endpoint& localEndPoint);
+
+      void listen();
+
+      [[nodiscard]]
+      Awaitable<void> connect(const ip_endpoint& remoteEndPoint) noexcept;
+      [[nodiscard]]
+      Awaitable<void> connect(const ip_endpoint& remoteEndPoint,
+                              cancellation_token ct) noexcept;
+
+      [[nodiscard]]
+      Awaitable<void> accept(socket& acceptingSocket) noexcept;
+      [[nodiscard]]
+      Awaitable<void> accept(socket& acceptingSocket,
+                              cancellation_token ct) noexcept;
+
+      [[nodiscard]]
+      Awaitable<void> disconnect() noexcept;
+      [[nodiscard]]
+      Awaitable<void> disconnect(cancellation_token ct) noexcept;
+
+      [[nodiscard]]
+      Awaitable<std::size_t> send(const void* buffer, std::size_t size) noexcept;
+      [[nodiscard]]
+      Awaitable<std::size_t> send(const void* buffer,
+                                 std::size_t size,
+                                 cancellation_token ct) noexcept;
+
+      [[nodiscard]]
+      Awaitable<std::size_t> recv(void* buffer, std::size_t size) noexcept;
+      [[nodiscard]]
+      Awaitable<std::size_t> recv(void* buffer,
+                                 std::size_t size,
+                                 cancellation_token ct) noexcept;
+
+      [[nodiscard]]
+      socket_recv_from_operation recv_from(
+         void* buffer,
+         std::size_t size) noexcept;
+      [[nodiscard]]
+      socket_recv_from_operation_cancellable recv_from(
+         void* buffer,
+         std::size_t size,
+         cancellation_token ct) noexcept;
+
+      [[nodiscard]]
+      socket_send_to_operation send_to(
+         const ip_endpoint& destination,
+         const void* buffer,
+         std::size_t size) noexcept;
+      [[nodiscard]]
+      socket_send_to_operation_cancellable send_to(
+         const ip_endpoint& destination,
+         const void* buffer,
+         std::size_t size,
+         cancellation_token ct) noexcept;
+
+      void close_send();
+      void close_recv();
+
+   };
+   }
+
+例子： echo 服务器
+
+.. code-block:: cpp
+
+   #include <cppcoro/net/socket.hpp>
+   #include <cppcoro/io_service.hpp>
+   #include <cppcoro/cancellation_source.hpp>
+   #include <cppcoro/async_scope.hpp>
+   #include <cppcoro/on_scope_exit.hpp>
+
+   #include <memory>
+   #include <iostream>
+
+   cppcoro::task<void> handle_connection(socket s)
+   {
+   try
+   {
+      const size_t bufferSize = 16384;
+      auto buffer = std::make_unique<unsigned char[]>(bufferSize);
+      size_t bytesRead;
+      do {
+         // 读取一些字节
+         bytesRead = co_await s.recv(buffer.get(), bufferSize);
+
+         // 写入一些字节
+         size_t bytesWritten = 0;
+         while (bytesWritten < bytesRead) {
+         bytesWritten += co_await s.send(
+            buffer.get() + bytesWritten,
+            bytesRead - bytesWritten);
+         }
+      } while (bytesRead != 0);
+
+      s.close_send();
+
+      co_await s.disconnect();
+   }
+   catch (...)
+   {
+      std::cout << "connection failed" << std::
+   }
+   }
+
+   cppcoro::task<void> echo_server(
+   cppcoro::net::ipv4_endpoint endpoint,
+   cppcoro::io_service& ioSvc,
+   cancellation_token ct)
+   {
+   cppcoro::async_scope scope;
+
+   std::exception_ptr ex;
+   try
+   {
+      auto listeningSocket = cppcoro::net::socket::create_tcpv4(ioSvc);
+      listeningSocket.bind(endpoint);
+      listeningSocket.listen();
+
+      while (true) {
+         auto connection = cppcoro::net::socket::create_tcpv4(ioSvc);
+         co_await listeningSocket.accept(connection, ct);
+         scope.spawn(handle_connection(std::move(connection)));
+      }
+   }
+   catch (cppcoro::operation_cancelled)
+   {
+   }
+   catch (...)
+   {
+      ex = std::current_exception();
+   }
+
+   // Wait until all handle_connection tasks have finished.
+   co_await scope.join();
+
+   if (ex) std::rethrow_exception(ex);
+   }
+
+   int main(int argc, const char* argv[])
+   {
+      cppcoro::io_service ioSvc;
+
+      if (argc != 2) return -1;
+
+      auto endpoint = cppcoro::ipv4_endpoint::from_string(argv[1]);
+      if (!endpoint) return -1;
+
+      (void)cppcoro::sync_wait(cppcoro::when_all(
+         [&]() -> task<>
+         {
+               // Shutdown the event loop once finished.
+               auto stopOnExit = cppcoro::on_scope_exit([&] { ioSvc.stop(); });
+
+               cppcoro::cancellation_source canceller;
+               co_await cppcoro::when_all(
+                  [&]() -> task<>
+                  {
+                     // Run for 30s then stop accepting new connections.
+                     co_await ioSvc.schedule_after(std::chrono::seconds(30));
+                     canceller.request_cancellation();
+                  }(),
+                  echo_server(*endpoint, ioSvc, canceller.token()));
+         }(),
+         [&]() -> task<>
+         {
+               ioSvc.process_events();
+         }()));
+
+      return 0;
+   }
+
 ip_address, ipv4_address, ipv6_address
 ========================================
+
+表示IP地址的辅助类
+
+API 摘要：
+
+.. code-block:: cpp
+
+   namespace cppcoro::net
+   {
+   class ipv4_address
+   {
+      using bytes_t = std::uint8_t[4];
+   public:
+      constexpr ipv4_address();
+      explicit constexpr ipv4_address(std::uint32_t integer);
+      explicit constexpr ipv4_address(const std::uint8_t(&bytes)[4]);
+      explicit constexpr ipv4_address(std::uint8_t b0,
+                                       std::uint8_t b1,
+                                       std::uint8_t b2,
+                                       std::uint8_t b3);
+
+      constexpr const bytes_t& bytes() const;
+
+      constexpr std::uint32_t to_integer() const;
+
+      static constexpr ipv4_address loopback();
+
+      constexpr bool is_loopback() const;
+      constexpr bool is_private_network() const;
+
+      constexpr bool operator==(ipv4_address other) const;
+      constexpr bool operator!=(ipv4_address other) const;
+      constexpr bool operator<(ipv4_address other) const;
+      constexpr bool operator>(ipv4_address other) const;
+      constexpr bool operator<=(ipv4_address other) const;
+      constexpr bool operator>=(ipv4_address other) const;
+
+      std::string to_string();
+
+      static std::optional<ipv4_address> from_string(std::string_view string) noexcept;
+   };
+
+   class ipv6_address
+   {
+      using bytes_t = std::uint8_t[16];
+   public:
+      constexpr ipv6_address();
+
+      explicit constexpr ipv6_address(
+         std::uint64_t subnetPrefix,
+         std::uint64_t interfaceIdentifier);
+
+      constexpr ipv6_address(
+         std::uint16_t part0,
+         std::uint16_t part1,
+         std::uint16_t part2,
+         std::uint16_t part3,
+         std::uint16_t part4,
+         std::uint16_t part5,
+         std::uint16_t part6,
+         std::uint16_t part7);
+
+      explicit constexpr ipv6_address(
+         const std::uint16_t(&parts)[8]);
+
+      explicit constexpr ipv6_address(
+         const std::uint8_t(bytes)[16]);
+
+      constexpr const bytes_t& bytes() const;
+
+      constexpr std::uint64_t subnet_prefix() const;
+      constexpr std::uint64_t interface_identifier() const;
+
+      static constexpr ipv6_address unspecified();
+      static constexpr ipv6_address loopback();
+
+      static std::optional<ipv6_address> from_string(std::string_view string) noexcept;
+
+      std::string to_string() const;
+
+      constexpr bool operator==(const ipv6_address& other) const;
+      constexpr bool operator!=(const ipv6_address& other) const;
+      constexpr bool operator<(const ipv6_address& other) const;
+      constexpr bool operator>(const ipv6_address& other) const;
+      constexpr bool operator<=(const ipv6_address& other) const;
+      constexpr bool operator>=(const ipv6_address& other) const;
+
+   };
+
+   class ip_address
+   {
+   public:
+
+      // 构造一个地址为 0.0.0.0 的 IPv4地址
+      ip_address() noexcept;
+
+      ip_address(ipv4_address address) noexcept;
+      ip_address(ipv6_address address) noexcept;
+
+      bool is_ipv4() const noexcept;
+      bool is_ipv6() const noexcept;
+
+      const ipv4_address& to_ipv4() const;
+      const ipv6_address& to_ipv6() const;
+
+      const std::uint8_t* bytes() const noexcept;
+
+      std::string to_string() const;
+
+      static std::optional<ip_address> from_string(std::string_view string) noexcept;
+
+      bool operator==(const ip_address& rhs) const noexcept;
+      bool operator!=(const ip_address& rhs) const noexcept;
+
+      //  ipv4_address sorts less than ipv6_address
+      bool operator<(const ip_address& rhs) const noexcept;
+      bool operator>(const ip_address& rhs) const noexcept;
+      bool operator<=(const ip_address& rhs) const noexcept;
+      bool operator>=(const ip_address& rhs) const noexcept;
+
+   };
+   }
+
 ip_endpoint, ipv4_endpoint, ipv6_endpoint
 ==========================================
+
+表示IP地址和端口号的辅助类
+
+API 摘要：
+
+.. code-block:: cpp
+
+   namespace cppcoro::net
+   {
+   class ipv4_endpoint
+   {
+   public:
+      ipv4_endpoint() noexcept;
+      explicit ipv4_endpoint(ipv4_address address, std::uint16_t port = 0) noexcept;
+
+      const ipv4_address& address() const noexcept;
+      std::uint16_t port() const noexcept;
+
+      std::string to_string() const;
+      static std::optional<ipv4_endpoint> from_string(std::string_view string) noexcept;
+   };
+
+   bool operator==(const ipv4_endpoint& a, const ipv4_endpoint& b);
+   bool operator!=(const ipv4_endpoint& a, const ipv4_endpoint& b);
+   bool operator<(const ipv4_endpoint& a, const ipv4_endpoint& b);
+   bool operator>(const ipv4_endpoint& a, const ipv4_endpoint& b);
+   bool operator<=(const ipv4_endpoint& a, const ipv4_endpoint& b);
+   bool operator>=(const ipv4_endpoint& a, const ipv4_endpoint& b);
+
+   class ipv6_endpoint
+   {
+   public:
+      ipv6_endpoint() noexcept;
+      explicit ipv6_endpoint(ipv6_address address, std::uint16_t port = 0) noexcept;
+
+      const ipv6_address& address() const noexcept;
+      std::uint16_t port() const noexcept;
+
+      std::string to_string() const;
+      static std::optional<ipv6_endpoint> from_string(std::string_view string) noexcept;
+   };
+
+   bool operator==(const ipv6_endpoint& a, const ipv6_endpoint& b);
+   bool operator!=(const ipv6_endpoint& a, const ipv6_endpoint& b);
+   bool operator<(const ipv6_endpoint& a, const ipv6_endpoint& b);
+   bool operator>(const ipv6_endpoint& a, const ipv6_endpoint& b);
+   bool operator<=(const ipv6_endpoint& a, const ipv6_endpoint& b);
+   bool operator>=(const ipv6_endpoint& a, const ipv6_endpoint& b);
+
+   class ip_endpoint
+   {
+   public:
+      //构造一个地址为 0.0.0.0:0 的 IPv4 终端
+      ip_endpoint() noexcept;
+
+      ip_endpoint(ipv4_endpoint endpoint) noexcept;
+      ip_endpoint(ipv6_endpoint endpoint) noexcept;
+
+      bool is_ipv4() const noexcept;
+      bool is_ipv6() const noexcept;
+
+      const ipv4_endpoint& to_ipv4() const;
+      const ipv6_endpoint& to_ipv6() const;
+
+      ip_address address() const noexcept;
+      std::uint16_t port() const noexcept;
+
+      std::string to_string() const;
+
+      static std::optional<ip_endpoint> from_string(std::string_view string) noexcept;
+
+      bool operator==(const ip_endpoint& rhs) const noexcept;
+      bool operator!=(const ip_endpoint& rhs) const noexcept;
+
+      //  IPv4 终端排序时要小于 IPv6 终端
+      bool operator<(const ip_endpoint& rhs) const noexcept;
+      bool operator>(const ip_endpoint& rhs) const noexcept;
+      bool operator<=(const ip_endpoint& rhs) const noexcept;
+      bool operator>=(const ip_endpoint& rhs) const noexcept;
+   };
+   }
+
+函数
+****************************************
+
+sync_wait()
+========================================
+when_all()
+========================================
+when_all_ready()
+========================================
+fmap()
+========================================
+schedule_on()
+========================================
+resume_on()
+========================================
+
 
 元函数
 ****************************************
@@ -763,6 +1571,19 @@ Scheduler
 ========================================
 DelayedScheduler
 ========================================
+
+构建
+****************************************
+
+在 Windows 上构建
+========================================
+
+在 Linux 上构建
+========================================
+
+支持
+****************************************
+
 
 Indices and tables
 ****************************************
