@@ -1235,8 +1235,103 @@ I/O 调度
 
 static_thread_pool
 ========================================
+
+:abbr:`静态线程池 (Static Thread Pool)` 提供了一个抽象，以允许你的调度工作运行在一个固定尺寸的线程池中。
+
+这个类实现了 ``Scheduler`` 概念（如下）
+
+你可以通过调用 ``co_await threadPool.schedule()`` 向线程池中添加任务。这个操作将会挂起当前协程、将它放入线程池的工作队列中。当线程池中有空闲线程可用于此协程时，将会恢复协程。 **此操作保证不发生异常。通常情况下也不会分配内存**
+
+该类利用 :abbr:`工作窃取 (Work-Stealing)` 算法在多个线程之间实现负载均衡。从线程池线程进入到线程池的任务将被调度到此线程独自的 FIFO 队列中，这意味着任务将在与原线程相同的线程上执行。而从外部进入到线程池中的任务，将进入一个全局的 FIFO 队列中。如果一个工作线程在它的本地队列中已经完成了工作，它会首先从全局队列中出列。如果本地队列为空，它会排在全局队列末尾以窃取工作。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   namespace cppcoro
+   {
+   class static_thread_pool
+   {
+   public:
+      // 初始化线程池对象并使用 std::thread::hardware_concurrency() 来设定线程池的线程数量
+      static_thread_pool();
+
+      // 以指定数量的线程来初始化线程池
+      explicit static_thread_pool(std::uint32_t threadCount);
+
+      std::uint32_t thread_count() const noexcept;
+
+      class schedule_operation
+      {
+      public:
+         schedule_operation(static_thread_pool* tp) noexcept;
+
+         bool await_ready() noexcept;
+         bool await_suspend(std::experimental::coroutine_handle<> h) noexcept;
+         bool await_resume() noexcept;
+
+      private:
+         // 未指定
+      };
+
+      // 返回一个可被协程 await 的操作
+      //
+      //
+      [[nodiscard]]
+      schedule_operation schedule() noexcept;
+
+   private:
+
+      // 未指定
+
+   };
+   }
+
+简单例子：
+
+.. code-block:: cpp
+
+   cppcoro::task<std::string> do_something_on_threadpool(cppcoro::static_thread_pool& tp)
+   {
+   // 首先将协程调入到线程池中
+   co_await tp.schedule();
+
+   // 当恢复时，此线程将运行在线程池中
+   do_something();
+   }
+
+例子：对静态线程池运行 ``schedule_on()`` 以并行执行任务
+
+.. code-block:: cpp
+
+   cppcoro::task<double> dot_product(static_thread_pool& tp, double a[], double b[], size_t count)
+   {
+   if (count > 1000)
+   {
+      // 将任务递归地细分为两个相同大小的任务
+      // 第一个任务将会运行到线程池中
+      // 第二个任务在此线程中继续执行
+      size_t halfCount = count / 2;
+      auto [first, second] = co_await when_all(
+         schedule_on(tp, dot_product(tp, a, b, halfCount),
+         dot_product(tp, a + halfCount, b + halfCount, count - halfCount));
+      co_return first + second;
+   }
+   else
+   {
+      double sum = 0.0;
+      for (size_t i = 0; i < count; ++i)
+      {
+         sum += a[i] * b[i];
+      }
+      co_return sum;
+   }
+   }
+
 io_service and io_work_scope
 ========================================
+
+
 file, readable_file, writable_file
 ========================================
 
@@ -1708,15 +1803,343 @@ DelayedScheduler
 构建
 ****************************************
 
+cppcoro 库的 Windows 构建要求至少  Visual Studio 2017，而 Linux 构建至少要求 Clang 5.0
+
+此库利用了 `Cake 构建系统 <https://github.com/lewissbaker/cake>`_ （ 不是用于 `C# <http://cakebuild.net/>`_ 的这个）
+
+Cake 构建系统会作为 git 子模块自动检出，所以你无需手动下载或安装它。
+
+.. note::  
+
+   译者注：
+
+   根据 vcpkg 中的 cppcoro 打包方式。 cppcoro 只需要仓库下的 ``include/cppcoro`` 文件夹，你可以将其拷贝到任意一个文件夹，然后在 CMake 或 其他构建工具中将其作为头文件目录包含即可。
+
+   由于PR ``https://github.com/lewissbaker/cppcoro/pull/171`` 还未被合并，在最新的编译器中你可能需要更改 cppcoro 中的代码以通过编译：将所有的 ``std::experimental`` 替换为 ``std`` ，将所有的 ``experimental/`` 删除。
+
+   参见 issue：https://github.com/lewissbaker/cppcoro/issues/191
+   
+   和   PR   ：https://github.com/msys2/MINGW-packages/pull/7834
+
 在 Windows 上构建
 ========================================
+
+这个库要求至少 Visual Studio 2017 ，还需要 Windows 10 SDK
+
+对 Clang （ `#3 <Visual Studio 2017>`_ ）和 Linux 的支持正处于计划中。
+
+Windows 环境需求
+----------------------------------------
+
+Cake 是由 Python 2.7 实现，因此要求安装 Python 2.7。
+
+确保 Python2.7 解释器在你的 PATH 变量中，并且名为 python 。
+
+确保 Visual Studio 2017 Update 3 已经安装。注意一些问题会出现在 Update 2 及以前的版本中，这些问题在 Update 3 才修复。
+
+你也可以从 https://vcppdogfooding.azurewebsites.net/ 下载并解压一个 NuGet 包以使用预览版本的 Visual Studio。解压  .nuget 到一个目录，并修改 ``config.cake`` 文件以指向此目录：
+
+.. code-block:: ini
+
+   nugetPath = None # r'C:\Path\To\VisualCppTools.14.0.25224-Pre'
+
+确保 Windows 10 SDK 已经安装。默认情况下它会使用 Windows 10 SDK latest 和 Universal C Runtime。
+
+Clone 仓库
+----------------------------------------
+
+cppcoro 使用 git 子模块来拉取 Cake 构建系统的源码。
+
+这意味着你在使用 ``git clone`` 时需要加上 ``--recursive`` 参数。
+
+.. code-block:: none
+
+   c:\Code> git clone --recursive https://github.com/lewissbaker/cppcoro.git
+
+如果你已经克隆了 cppcoro，你需要更新子模块：
+
+.. code-block:: none
+
+   c:\Code\cppcoro> git submodule update --init --recursive
+
+从命令行构构建
+----------------------------------------
+   
+要从命令行构建只需要执行 'cake.bat' 文件：
+
+.. code-block:: cmd
+
+   C:\cppcoro> cake.bat
+   Building with C:\cppcoro\config.cake - Variant(release='debug', platform='windows', architecture='x86', compilerFamily='msvc', compiler='msvc14.10')
+   Building with C:\cppcoro\config.cake - Variant(release='optimised', platform='windows', architecture='x64', compilerFamily='msvc', compiler='msvc14.10')
+   Building with C:\cppcoro\config.cake - Variant(release='debug', platform='windows', architecture='x64', compilerFamily='msvc', compiler='msvc14.10')
+   Building with C:\cppcoro\config.cake - Variant(release='optimised', platform='windows', architecture='x86', compilerFamily='msvc', compiler='msvc14.10')
+   Compiling test\main.cpp
+   Compiling test\main.cpp
+   Compiling test\main.cpp
+   Compiling test\main.cpp
+   ...
+   Linking build\windows_x86_msvc14.10_debug\test\run.exe
+   Linking build\windows_x64_msvc14.10_optimised\test\run.exe
+   Linking build\windows_x86_msvc14.10_optimised\test\run.exe
+   Linking build\windows_x64_msvc14.10_debug\test\run.exe
+   Generating code
+   Finished generating code
+   Generating code
+   Finished generating code
+   Build succeeded.
+   Build took 0:00:02.419.
+
+默认情况下，执行 ``cake`` 而不传入任何参数，将会构建项目的所有版本并进行单元测试。通过传入参数你可以缩减其构建的范围:
+
+.. code-block:: none
+
+   c:\cppcoro> cake.bat release=debug architecture=x64 lib/build.cake
+   Building with C:\Users\Lewis\Code\cppcoro\config.cake - Variant(release='debug', platform='windows', architecture='x64', compilerFamily='msvc', compiler='msvc14.10')
+   Archiving build\windows_x64_msvc14.10_debug\lib\cppcoro.lib
+   Build succeeded.
+   Build took 0:00:00.321.
+
+你可以运行 ``cake --help`` 去列出所有可用的命令行选项。
+
+使用 Visual Studio 项目文件构建
+----------------------------------------
+
+如果希望在 Visual Studio 中构建，你可以运行 ``cake.bat -p`` 以生成 .vcproj/.sln 文件。
+
+例如：
+
+.. code-block:: none
+
+   c:\cppcoro> cake.bat -p
+   Building with C:\cppcoro\config.cake - Variant(release='debug', platform='windows', architecture='x86', compilerFamily='msvc', compiler='msvc14.10')
+   Building with C:\cppcoro\config.cake - Variant(release='optimised', platform='windows', architecture='x64', compilerFamily='msvc', compiler='msvc14.10')
+   Building with C:\cppcoro\config.cake - Variant(release='debug', platform='windows', architecture='x64', compilerFamily='msvc', compiler='msvc14.10')
+   Building with C:\cppcoro\config.cake - Variant(release='optimised', platform='windows', architecture='x86', compilerFamily='msvc', compiler='msvc14.10')
+   Generating Solution build/project/cppcoro.sln
+   Generating Project build/project/cppcoro_tests.vcxproj
+   Generating Filters build/project/cppcoro_tests.vcxproj.filters
+   Generating Project build/project/cppcoro.vcxproj
+   Generating Filters build/project/cppcoro.vcxproj.filters
+   Build succeeded.
+   Build took 0:00:00.247.
+
+当您从Visual Studio中构建这些项目时，它将调用 cake 来执行编译。
 
 在 Linux 上构建
 ========================================
 
+cppcoro 也可以在拥有 Clang 和至少 libc++ 5.0 的 Linux 下构建。
+
+构建 cppcoro 在 Ubuntu 17.04 上通过测试。
+
+Linux 环境需求
+----------------------------------------
+
+确保以下包你已经安装：
+
+- Python 2.7
+- Clang >= 5.0
+- LLD >= 5.0
+- libc++ >= 5.0
+
+构建 cppcoro
+----------------------------------------
+
+此处猜测 Clang 和 libc++ 你已经安装了。
+
+如果您还没有配置 Clang ，请参阅以下部分，了解有关使用 Clang 构建 cppcoro 的配置细节。
+
+检出 cppcoro 极其子模块：
+
+.. code-block:: shell
+
+   git clone --recursive https://github.com/lewissbaker/cppcoro.git cppcoro
+
+运行 ``init.sh`` 以设置 ``cake`` 函数
+
+.. code-block:: shell
+
+   cd cppcoro
+   source init.sh
+
+然后，您可以从工作区根目录运行 cake 来构建 cppcoro 并运行测试：
+
+.. code-block:: none
+
+   $ cake
+
+您可以指定额外的命令行参数来定制构建：
+
+- ``--help`` 将打印出有关命令行参数的帮助
+
+- ``--debug=run`` 显示将要运行的构建命令行
+
+- ``release=debug`` 或 ``release=optimised`` 会将构建变体限制为 debug 或 optimised （默认情况下，将同时构建两者）。
+
+- ``lib/build.cake`` 只会构建 cppcoro 库而没有单元测试。
+
+- ``test/build.cake@task_tests.cpp`` 只会编译特定的源文件
+
+- ``test/build.cake@testresult`` 将构建并运行单元测试
+
+例如：
+
+.. code-block:: none
+
+   $ cake --debug=run release=debug lib/build.cake
+
+自定义 Clang 位置
+----------------------------------------
+
+如果你的 clang 编译器不是在 ``/usr/bin/clang`` ，则你可以 ``cake`` 的命令行选项来指出 clang 的位置：
+
+- ``--clang-executable=<名称>`` 指定要使用的 clang 可执行文件名称，而不是clang。 例如：传入 ``--clang-executable=clang-8`` 以强制使用 Clang 8.0
+
+- ``--clang-executable=<abspath>`` 指定 clang 可执行文件的完整路径。 构建系统还将在同一目录中查找其他可执行文件。 如果此路径的格式为 ``<prefix>/ bin/<name>`` ，则默认的 ``clang-install-prefix`` 将被设置为 ``<prefix>`` 。
+
+- ``--clang-install-prefix=<路径>`` 指定安装 clang 的路径。这将导致构建系统在 ``<path>/bin`` 下查找 clang（除非被 ``--clang-executable`` 覆盖）。
+
+- ``--libcxx-install-prefix=<路径>`` 指定已安装的 libc++ 的路径。 默认情况下，构建系统将在与 clang 相同的位置寻找 libc++ 。 如果将其安装在其他位置，请使用此命令行选项。
+
+例如：使用安装在默认位置的特定版本的 clang
+
+.. code-block:: none
+
+   $ cake --clang-executable=clang-8
+
+例如：使用自定义位置下默认版本的 clang
+
+.. code-block:: none
+
+   $ cake --clang-install-prefix=/path/to/clang-install
+
+例如：使用自定义位置的 clang，自定义版本的 clang，自定义位置的 libc++ ：
+
+.. code-block:: none
+
+   $ cake --clang-executable=/path/to/clang-install/bin/clang-8 --libcxx-install-prefix=/path/to/libcxx-install
+
+使用 Clang 的快照构建
+----------------------------------------
+
+如果您的 Linux 发行版没有 Clang 5.0 或更高版本，您可以从 LLVM 项目中安装一个快照构建。
+
+按照 http://apt.llvm.org/ 上的说明设置软件包管理器，以支持从 LLVM 源中获取软件。
+
+比如：对于 Ubuntu 17.04 Zesty：
+
+编辑 ``/etc/apt/sources.list`` 并添加一下行：
+
+.. code-block:: none
+
+   deb http://apt.llvm.org/zesty/ llvm-toolchain-zesty main
+   deb-src http://apt.llvm.org/zesty/ llvm-toolchain-zesty main
+
+安装 PGP 密钥：
+
+.. code-block:: none
+
+   $ wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+
+安装 Clang 和 LLD ：
+
+.. code-block:: none
+
+   $ sudo apt-get install clang-6.0 lld-6.0
+
+构建你的 Clang
+----------------------------------------
+
+你也可以使用最前沿的 Clang，自己从源代码构建 Clang 。
+
+指令如下：
+
+为此，您需要安装以下软件：
+
+.. code-block:: none
+
+   $ sudo apt-get install git cmake ninja-build clang lld
+
+请注意，我们正在使用您发行版的 clang 版本从源代码构建 clang 。这里也可以使用 GCC 。
+
+检出 LLVM + Clang + LLD + libc++ 仓库：
+
+.. code-block:: shell
+
+   mkdir llvm
+   cd llvm
+   git clone --depth=1 https://github.com/llvm-mirror/llvm.git llvm
+   git clone --depth=1 https://github.com/llvm-mirror/clang.git llvm/tools/clang
+   git clone --depth=1 https://github.com/llvm-mirror/lld.git llvm/tools/lld
+   git clone --depth=1 https://github.com/llvm-mirror/libcxx.git llvm/projects/libcxx
+   ln -s llvm/tools/clang clang
+   ln -s llvm/tools/lld lld
+   ln -s llvm/projects/libcxx libcxx
+
+配置并构建 Clang :
+
+.. code-block:: shell
+
+   mkdir clang-build
+   cd clang-build
+   cmake -GNinja \
+         -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+         -DCMAKE_C_COMPILER=/usr/bin/clang \
+         -DCMAKE_BUILD_TYPE=MinSizeRel \
+         -DCMAKE_INSTALL_PREFIX="/path/to/clang/install"
+         -DCMAKE_BUILD_WITH_INSTALL_RPATH="yes" \
+         -DLLVM_TARGETS_TO_BUILD=X86 \
+         -DLLVM_ENABLE_PROJECTS="lld;clang" \
+         ../llvm
+   ninja install-clang \
+         install-clang-headers \
+         install-llvm-ar \
+         install-lld
+
+构建 libc++
+----------------------------------------
+
+由于使用了 ``<experimental/coroutine>`` ，cppcoro 需要 libc++ 以使用 Clang 中的 C++ 协程。
+
+检出 ``libc++`` + ``llvm`` ：
+
+.. code-block:: shell
+
+   mkdir llvm
+   cd llvm
+   git clone --depth=1 https://github.com/llvm-mirror/llvm.git llvm
+   git clone --depth=1 https://github.com/llvm-mirror/libcxx.git llvm/projects/libcxx
+   ln -s llvm/projects/libcxx libcxx
+
+构建 ``libc++``
+
+.. code-block:: shell
+
+   mkdir libcxx-build
+   cd libcxx-build
+   cmake -GNinja \
+         -DCMAKE_CXX_COMPILER="/path/to/clang/install/bin/clang++" \
+         -DCMAKE_C_COMPILER="/path/to/clang/install/bin/clang" \
+         -DCMAKE_BUILD_TYPE=Release \
+         -DCMAKE_INSTALL_PREFIX="/path/to/clang/install" \
+         -DLLVM_PATH="../llvm" \
+         -DLIBCXX_CXX_ABI=libstdc++ \
+         -DLIBCXX_CXX_ABI_INCLUDE_PATHS="/usr/include/c++/6.3.0/;/usr/include/x86_64-linux-gnu/c++/6.3.0/" \
+         ../libcxx
+   ninja cxx
+   ninja install
+
+这将构建并将 libc++ 安装到与 clang 相同的目录中。
+
 支持
 ****************************************
 
+GitHub 的 issues 是支持、bug 报告和新特性请求的主要方式。
+
+在同意 MIT 许可的情况下，欢迎任何贡献和 Pull-Requests 。
+
+如果你遇到 C++ 协程的问题，一般你可以在 ``Cpplang Slack <https://cpplang.slack.com/>`_ 组的 ``#coroutines`` 频道中获得帮助。
 
 Indices and tables
 ****************************************
