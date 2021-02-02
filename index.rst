@@ -1083,22 +1083,155 @@ API 摘要：
    }
 
 
-撤销
+撤销操作
 ****************************************
 
 cancellation_token
 ========================================
 
+一个 :abbr:`撤销令牌 (Cancellation Token)` 是一个可以被传递给函数的值，以允许调用者其后请求撤销对该函数的调用。
+
+要获得一个可用于撤销操作的 ``撤销令牌`` ，你首先需要创建一个``cancellation_source`` 对象。方法 ``cancellation_source::token()`` 可用于创建新的、与 ``cancellation_source`` 相关联的 ``撤销令牌`` 。
+
+然后你可以通过 ``cancellation_source::request_cancellation()`` 向 ``cancellation_source`` 传递相关联的撤销令牌，以撤销对函数的调用。
+
+函数以以下两种方式来获得是否有撤销请求：
+
+#. 定期调用 ``cancellation_token::is_cancellation_requested()`` 或 ``cancellation_token::throw_if_cancellation_requested()``
+#. 使用 ``cancellation_registration`` 类注册一个 *在出现撤销请求时调用的回调函数* 。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   namespace cppcoro
+   {
+   class cancellation_source
+   {
+   public:
+      // 构造一个新的、独立的、可撤销的 cancellation_source
+      cancellation_source();
+
+      // 构造一个与 other 撤销状态相同的新引用
+      cancellation_source(const cancellation_source& other) noexcept;
+      cancellation_source(cancellation_source&& other) noexcept;
+
+      ~cancellation_source();
+
+      cancellation_source& operator=(const cancellation_source& other) noexcept;
+      cancellation_source& operator=(cancellation_source&& other) noexcept;
+
+      bool is_cancellation_requested() const noexcept;
+      bool can_be_cancelled() const noexcept;
+      void request_cancellation();
+
+      cancellation_token token() const noexcept;
+   };
+
+   class cancellation_token
+   {
+   public:
+      // 构造一个无法被撤销的令牌
+      cancellation_token() noexcept;
+
+      cancellation_token(const cancellation_token& other) noexcept;
+      cancellation_token(cancellation_token&& other) noexcept;
+
+      ~cancellation_token();
+
+      cancellation_token& operator=(const cancellation_token& other) noexcept;
+      cancellation_token& operator=(cancellation_token&& other) noexcept;
+
+      bool is_cancellation_requested() const noexcept;
+      void throw_if_cancellation_requested() const;
+
+      // 查询此令牌是否有取消请求。
+      // 当函数调用无需撤销时，代码可据此设置更有效的 code-path
+      bool can_be_cancelled() const noexcept;
+   };
+
+
+   // RAII 类。用于注册在撤销时调用的回调函数
+   class cancellation_registration
+   {
+   public:
+
+      // 注册一个在撤销时调用的回调函数
+      // 如果还没有请求撤销，则在调用 request_cancellation() 的线程上调用回调函数，否则在此线程内立即调用回调函数
+      // 回调函数不得抛出异常
+      template<typename CALLBACK>
+      cancellation_registration(cancellation_token token, CALLBACK&& callback);
+
+      cancellation_registration(const cancellation_registration& other) = delete;
+
+      ~cancellation_registration();
+   };
+
+   class operation_cancelled : public std::exception
+   {
+   public:
+      operation_cancelled();
+      const char* what() const override;
+   };
+   }
+
+例子：论询方式
+
+.. code-block:: cpp
+
+   cppcoro::task<> do_something_async(cppcoro::cancellation_token token)
+   {
+   // 通过调用 throw_if_cancellation_requested() 在函数内显式创建一个可撤销点
+   token.throw_if_cancellation_requested();
+
+   co_await do_step_1();
+
+   token.throw_if_cancellation_requested();
+
+   do_step_2();
+
+   // 可选的。通过查询是否有撤销请求以在函数返回前进行清理工作
+   if (token.is_cancellation_requested())
+   {
+      display_message_to_user("Cancelling operation...");
+      do_cleanup();
+      throw cppcoro::operation_cancelled{};
+   }
+
+   do_final_step();
+   }
+
+例子：回调方式
+
+.. code-block:: cpp
+
+   // 假设我们现在有一个定时器，其具有撤销 API，但是还不支持撤销令牌。
+   // 我们可以使用一个 cancellation_registration 对象来注册一个回调函数，在回调函数内可调用已经存在的撤销 API
+   cppcoro::task<> cancellable_timer_wait(cppcoro::cancellation_token token)
+   {
+   auto timer = create_timer(10s);
+
+   cppcoro::cancellation_registration registration(token, [&]
+   {
+      // 调用已经存在的定时器撤销 API
+      timer.cancel();
+   });
+
+   co_await timer;
+   }
 
 cancellation_source
 ========================================
+
+此处原文档尚未更新
+
 cancellation_registration
 ========================================
 
+此处原文档尚未更新
 
 I/O 调度
 ****************************************
-
 
 static_thread_pool
 ========================================
