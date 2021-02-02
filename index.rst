@@ -23,7 +23,7 @@ CppCoro - 一个 C++ 协程库
 .. |Linux 构建状态| image:: https://travis-ci.org/lewissbaker/cppcoro.svg?branch=master
    :target: https://travis-ci.org/lewissbaker/cppcoro
 
-Linux 除了 ``io_context`` 和 文件 I/O 相关的类没有实现外，其余功能都是可用的。（详情请查询  `#15 <https://github.com/lewissbaker/cppcoro/issues/15>`_ ）
+Linux 除了 ``io_context`` 和 文件 I/O 相关的类没有实现外，其余功能都是可用的。（详情请参阅  `#15 <https://github.com/lewissbaker/cppcoro/issues/15>`_ ）
 
 协程类型
 ****************************************
@@ -226,7 +226,7 @@ gengrator<T>
 
 协程可以使用 ``co_yield`` 来产生一个类型为 T 的值。但是协程内无法使用 co_await 关键字。值的产生必须是同步的。
 
-.. code-block:: cpp
+.. code-block:: none
 
    cppcoro::generator<const std::uint64_t> fibonacci()
    {
@@ -938,7 +938,7 @@ API 摘要：
 
 例子：
 
-.. code-block:: cpp
+.. code-block:: none
 
    using namespace cppcoro;
    using namespace std::chrono;
@@ -1331,12 +1331,353 @@ API 摘要：
 io_service and io_work_scope
 ========================================
 
+``io_service`` 类为处理异步 I/O 操作完成事件提供了抽象。
+
+当 I/O 操作完成时，await 其的协程将会在 I/O 线程的以下事件处理函数中被恢复： ``process_events()`` 、 ``process_pending_events()`` 、 ``process_one_event()``  、 ``process_one_pending_event()`` 
+
+``io_service`` 类不会管理任何 I/O 线程。你必须确保为 await 的协程而调用的事件处理函数被 dispatch。要么用独立的线程调用 ``process_events()`` ，要么将其与其他事件循环混用（比如 UI 事件循环）并周期性地调用 ``process_pending_events()`` 或 ``process_one_pending_event()``
+
+``io_service`` 可以被集成到其他事件循环中，比如 UI 事件循环。
+
+通过多个线程调用 ``process_events()`` 函数，你可以同时处理多个事件。在 ``io_service`` 构造时，你也可以为其传入一个参数，以示意最多应当能有多少个同时运行的事件处理函数。
+
+在 Windows 上，此实现充分利用了 :abbr:`Windows I/O 完成端口 (Windows I/O Completion Port)` 以可拓展的方式向 I/O 线程分发事件。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   namespace cppcoro
+   {
+   class io_service
+   {
+   public:
+
+      class schedule_operation;
+      class timed_schedule_operation;
+
+      io_service();
+      io_service(std::uint32_t concurrencyHint);
+
+      io_service(io_service&&) = delete;
+      io_service(const io_service&) = delete;
+      io_service& operator=(io_service&&) = delete;
+      io_service& operator=(const io_service&) = delete;
+
+      ~io_service();
+
+      // 调度器方法
+
+      [[nodiscard]]
+      schedule_operation schedule() noexcept;
+
+      template<typename REP, typename RATIO>
+      [[nodiscard]]
+      timed_schedule_operation schedule_after(
+         std::chrono::duration<REP, RATIO> delay,
+         cppcoro::cancellation_token cancellationToken = {}) noexcept;
+
+      // 事件循环方法
+      //
+      // I/O 线程必须调用这些方法来处理 I/O 事件并运行被调度的线程
+      // scheduled coroutines.
+
+      std::uint64_t process_events();
+      std::uint64_t process_pending_events();
+      std::uint64_t process_one_event();
+      std::uint64_t process_one_pending_event();
+
+      // 这里要求所有事件处理线程都已经退出它们的事件循环
+      void stop() noexcept;
+
+      // 查询孙是否有线程调用过 stop()
+      bool is_stop_requested() const noexcept;
+
+      // 重置调用过 stop() 的事件循环，以让其可以再次处理事件
+      void reset();
+
+      // 使用引用计数的方式追踪外部对 io_service 的引用
+      //
+      // 当引用计数递减为零时，io_service::stop() 将被调用
+      //
+      // 当 进入/退出 作用域时，使用 RAII 类 io_work_scope 来管理这些方法的调用
+      void notify_work_started() noexcept;
+      void notify_work_finished() noexcept;
+
+   };
+
+   class io_service::schedule_operation
+   {
+   public:
+      schedule_operation(const schedule_operation&) noexcept;
+      schedule_operation& operator=(const schedule_operation&) noexcept;
+
+      bool await_ready() const noexcept;
+      void await_suspend(std::experimental::coroutine_handle<> awaiter) noexcept;
+      void await_resume() noexcept;
+   };
+
+   class io_service::timed_schedule_operation
+   {
+   public:
+      timed_schedule_operation(timed_schedule_operation&&) noexcept;
+
+      timed_schedule_operation(const timed_schedule_operation&) = delete;
+      timed_schedule_operation& operator=(const timed_schedule_operation&) = delete;
+      timed_schedule_operation& operator=(timed_schedule_operation&&) = delete;
+
+      bool await_ready() const noexcept;
+      void await_suspend(std::experimental::coroutine_handle<> awaiter);
+      void await_resume();
+   };
+
+   class io_work_scope
+   {
+   public:
+
+      io_work_scope(io_service& ioService) noexcept;
+
+      io_work_scope(const io_work_scope& other) noexcept;
+      io_work_scope(io_work_scope&& other) noexcept;
+
+      ~io_work_scope();
+
+      io_work_scope& operator=(const io_work_scope& other) noexcept;
+      io_work_scope& operator=(io_work_scope&& other) noexcept;
+
+      io_service& service() const noexcept;
+   };
+
+   }
+
+例子：
+
+.. code-block:: cpp
+
+   #include <cppcoro/task.hpp>
+   #include <cppcoro/task.hpp>
+   #include <cppcoro/io_service.hpp>
+   #include <cppcoro/read_only_file.hpp>
+
+   #include <experimental/filesystem>
+   #include <memory>
+   #include <algorithm>
+   #include <iostream>
+
+   namespace fs = std::experimental::filesystem;
+
+   cppcoro::task<std::uint64_t> count_lines(cppcoro::io_service& ioService, fs::path path)
+   {
+   auto file = cppcoro::read_only_file::open(ioService, path);
+
+   constexpr size_t bufferSize = 4096;
+   auto buffer = std::make_unique<std::uint8_t[]>(bufferSize);
+
+   std::uint64_t newlineCount = 0;
+
+   for (std::uint64_t offset = 0, fileSize = file.size(); offset < fileSize;)
+   {
+      const auto bytesToRead = static_cast<size_t>(
+         std::min<std::uint64_t>(bufferSize, fileSize - offset));
+
+      const auto bytesRead = co_await file.read(offset, buffer.get(), bytesToRead);
+
+      newlineCount += std::count(buffer.get(), buffer.get() + bytesRead, '\n');
+
+      offset += bytesRead;
+   }
+
+   co_return newlineCount;
+   }
+
+   cppcoro::task<> run(cppcoro::io_service& ioService)
+   {
+   cppcoro::io_work_scope ioScope(ioService);
+
+   auto lineCount = co_await count_lines(ioService, fs::path{"foo.txt"});
+
+   std::cout << "foo.txt has " << lineCount << " lines." << std::endl;;
+   }
+
+   cppcoro::task<> process_events(cppcoro::io_service& ioService)
+   {
+   // 处理事件至 io_service 被停止时
+   // 比如：当最后一个 io_work_scope 退出作用域时
+   ioService.process_events();
+   co_return;
+   }
+
+   int main()
+   {
+   cppcoro::io_service ioService;
+
+   cppcoro::sync_wait(cppcoro::when_all_ready(
+      run(ioService),
+      process_events(ioService)));
+
+   return 0;
+   }
+
+**io_service 作为调度器**
+
+``io_service`` 实现了 ``Scheduler`` 和 ``DelayedScheduler`` :abbr:`概念 (Concepts)` 
+
+这允许协程在当前线程暂停运行，并在一个与 ``io_service`` 相关联的 I/O 线程中被唤醒。
+
+例子：
+
+.. code-block:: cpp
+
+   cppcoro::task<> do_something(cppcoro::io_service& ioService)
+   {
+   // 协程在被 await 的线程中开始运行
+
+   // 通过 await io_service::schedule() 的结果，协程可以转移到 I/O 线程中运行
+   co_await ioService.schedule();
+
+   // 此时，此协程运行在调用了 io_service 事件处理函数的 I/O 线程中
+
+   // 协程也可以使用一个 Delayed-Schedule 的动作。当 I/O 线程恢复它时，它会延迟指定的时间。
+   co_await ioService.schedule_after(100ms);
+
+   // 此处，协程应该运行在一个不同的 I/O 线程中
+   }
 
 file, readable_file, writable_file
 ========================================
 
+这些抽象基类用于表现具体的文件 I/O
+
+API 摘要：
+
+.. code-block:: cpp
+
+   namespace cppcoro
+   {
+   class file_read_operation;
+   class file_write_operation;
+
+   class file
+   {
+   public:
+
+      virtual ~file();
+
+      std::uint64_t size() const;
+
+   protected:
+
+      file(file&& other) noexcept;
+
+   };
+
+   class readable_file : public virtual file
+   {
+   public:
+
+      [[nodiscard]]
+      file_read_operation read(
+         std::uint64_t offset,
+         void* buffer,
+         std::size_t byteCount,
+         cancellation_token ct = {}) const noexcept;
+
+   };
+
+   class writable_file : public virtual file
+   {
+   public:
+
+      void set_size(std::uint64_t fileSize);
+
+      [[nodiscard]]
+      file_write_operation write(
+         std::uint64_t offset,
+         const void* buffer,
+         std::size_t byteCount,
+         cancellation_token ct = {}) noexcept;
+
+   };
+
+   class file_read_operation
+   {
+   public:
+
+      file_read_operation(file_read_operation&& other) noexcept;
+
+      bool await_ready() const noexcept;
+      bool await_suspend(std::experimental::coroutine_handle<> awaiter);
+      std::size_t await_resume();
+
+   };
+
+   class file_write_operation
+   {
+   public:
+
+      file_write_operation(file_write_operation&& other) noexcept;
+
+      bool await_ready() const noexcept;
+      bool await_suspend(std::experimental::coroutine_handle<> awaiter);
+      std::size_t await_resume();
+
+   };
+   }
+
 read_only_file, write_only_file, read_write_file
 ==================================================
+
+这些类型代表了具体的文件 I/O 类：
+
+API 摘要：
+
+.. code-block:: cpp
+
+   namespace cppcoro
+   {
+   class read_only_file : public readable_file
+   {
+   public:
+
+      [[nodiscard]]
+      static read_only_file open(
+         io_service& ioService,
+         const std::experimental::filesystem::path& path,
+         file_share_mode shareMode = file_share_mode::read,
+         file_buffering_mode bufferingMode = file_buffering_mode::default_);
+
+   };
+
+   class write_only_file : public writable_file
+   {
+   public:
+
+      [[nodiscard]]
+      static write_only_file open(
+         io_service& ioService,
+         const std::experimental::filesystem::path& path,
+         file_open_mode openMode = file_open_mode::create_or_open,
+         file_share_mode shareMode = file_share_mode::none,
+         file_buffering_mode bufferingMode = file_buffering_mode::default_);
+
+   };
+
+   class read_write_file : public readable_file, public writable_file
+   {
+   public:
+
+      [[nodiscard]]
+      static read_write_file open(
+         io_service& ioService,
+         const std::experimental::filesystem::path& path,
+         file_open_mode openMode = file_open_mode::create_or_open,
+         file_share_mode shareMode = file_share_mode::none,
+         file_buffering_mode bufferingMode = file_buffering_mode::default_);
+
+   };
+   }
+
+所有的 ``open()`` 函数在出错时都会抛出 ``std::system_error`` 异常。
 
 网络
 ****************************************
@@ -1780,15 +2121,55 @@ resume_on()
 元函数
 ****************************************
 
-
-is_awaitable<T>
-========================================
 awaitable_traits<T>
 ========================================
 
+此元函数用于当 ``co_await`` 的类型为 T 时，其结果的类型。
+
+注意：这里假设被 await 的类型 ``T`` 的值在其上下文中没有被任何协程 Promise 对象的 ``await_transform`` 所影响。否则，类型 ``T`` 的结果类型可能不同。
+
+若类型 ``T`` 是不可 await 的，则 awaitable_traits<T> 原函数不会定义任何嵌套的 ``awaiter_t`` 或 ``await_result_t`` 类型。当类型 ``T`` 不可 await 时，这允许它在禁用重载的 :abbr:`SFINAE (Substitution Failure Is Not An Error)` 上下文中被使用。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/awaitable_traits.hpp>
+   namespace cppcoro
+   {
+   template<typename T>
+   struct awaitable_traits
+   {
+      // 若类型 T 支持 `operator co_await()` 则为 `operator co_await()` 类型 T 的结果，否则为 `T&&`
+      typename awaiter_t = <unspecified>;
+
+      // co_await 类型 T 的结果的值
+      typename await_result_t = <unspecified>;
+   };
+   }
+
+is_awaitable<T>
+========================================
+
+``is_awaitable<T>`` 元函数能用来查询协程中一个指定的类型能否被 ``co_await`` 。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/is_awaitable.hpp>
+   namespace cppcoro
+   {
+   template<typename T>
+   struct is_awaitable : std::bool_constant<...>
+   {};
+
+   template<typename T>
+   constexpr bool is_awaitable_v = is_awaitable<T>::value;
+   }
+
 概念
 ****************************************
-
 
 Awaitable<T>
 ========================================
@@ -1818,7 +2199,7 @@ Cake 构建系统会作为 git 子模块自动检出，所以你无需手动下�
    由于PR ``https://github.com/lewissbaker/cppcoro/pull/171`` 还未被合并，在最新的编译器中你可能需要更改 cppcoro 中的代码以通过编译：将所有的 ``std::experimental`` 替换为 ``std`` ，将所有的 ``experimental/`` 删除。
 
    参见 issue：https://github.com/lewissbaker/cppcoro/issues/191
-   
+
    和   PR   ：https://github.com/msys2/MINGW-packages/pull/7834
 
 在 Windows 上构建
@@ -1867,7 +2248,7 @@ cppcoro 使用 git 子模块来拉取 Cake 构建系统的源码。
    
 要从命令行构建只需要执行 'cake.bat' 文件：
 
-.. code-block:: cmd
+.. code-block:: none
 
    C:\cppcoro> cake.bat
    Building with C:\cppcoro\config.cake - Variant(release='debug', platform='windows', architecture='x86', compilerFamily='msvc', compiler='msvc14.10')
