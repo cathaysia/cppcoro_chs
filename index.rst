@@ -2106,9 +2106,61 @@ API 摘要：
 
 sync_wait()
 ========================================
-when_all()
-========================================
+
+``sync_wait()`` 能被用于同步 wait 直到指定的 ``awaitable`` 完成。
+
+指定的 awaitable 将会在当前线程新建的一个协程内被 ``co_await``
+
+``sync_wait()`` 的调用将会阻塞线程至操作完成。结果要么返回 ``co_await`` 的结果，要么重新抛出未捕获异常。
+
+``sync_wait()`` 一般用于等待 ``main()`` 中顶层任务的完成，实际上它也是启动顶层 ``task`` 的唯一方法。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/sync_wait.hpp>
+   namespace cppcoro
+   {
+   template<typename AWAITABLE>
+   auto sync_wait(AWAITABLE&& awaitable)
+      -> typename awaitable_traits<AWAITABLE&&>::await_result_t;
+   }
+
+例子：
+
+.. code-block:: cpp
+
+   void example_task()
+   {
+   auto makeTask = []() -> task<std::string>
+   {
+      co_return "foo";
+   };
+
+   auto task = makeTask();
+
+   // 启动此“惰性任务”并等待它完成
+   sync_wait(task); // -> "foo"
+   sync_wait(makeTask()); // -> "foo"
+   }
+
+   void example_shared_task()
+   {
+   auto makeTask = []() -> shared_task<std::string>
+   {
+      co_return "foo";
+   };
+
+   auto task = makeTask();
+   // 启动此共享任务并等待它完成
+   sync_wait(task) == "foo";
+   sync_wait(makeTask()) == "foo";
+   }
+
 when_all_ready()
+========================================
+when_all()
 ========================================
 fmap()
 ========================================
@@ -2174,12 +2226,74 @@ API 摘要：
 Awaitable<T>
 ========================================
 
+:abbr:`概念 (Concepts)` ``Awaitable<T>`` 表明了一个在协程上下文中可被 ``co_await`` 的对象，并且没有 ``await_transform`` 的重载。其对应的 ``co_await`` 表达式类型为 ``T`` 。
+
+比如， ``task<T>`` 实现了概念 ``Awaitable<T&&>`` ，而类型 ``task<T>&`` 实现了概念 ``Awaitable<T&>``
+
 Awaiter<T>
 ========================================
+
+概念 ``Awaiter<T>`` 表明了一个类型，其实现了把被 await 的协程暂停/恢复的协议。其必须拥有的 ``await_ready`` 、 ``await_suspend`` 和 ``await_resume`` 方法。
+
+假设有一个类型 ``awaiter`` ，则要满足 ``Awaiter<T>`` 的需求，其需要：
+
+- ``awaiter.await_ready()`` -> ``bool``
+- ``awaiter.await_suspend(std::experimental::coroutine_handle<void>{}) -> void`` 或 ``bool`` 或 ``std::experimental::coroutine_handle<P>`` 对于一些 ``P``.
+- ``awaiter.await_resume() -> T``
+
+任何实现了概念 ``Awaiter<T>`` 的类型也同时实现了概念 ``Awaitable<T>``
+
 Scheduler
 ========================================
+
+概念 ``Scheduler`` 改变了允许在一些运行上下文中调度协程的运行。
+
+.. code-block:: cpp
+
+   concept Scheduler
+   {
+   Awaitable<void> schedule();
+   }
+
+假设有类型 ``S`` 实现了 ``Scheduler`` 概念，且有实例 ``s`` 。则：
+
+- ``s.schedule()`` 方法返回一个 Awaitable 类型。因此 ``co_await s.schedule()`` 将会无条件暂停当前协程并调度其在与 ``s`` 相关的协程内恢复。
+- ``co_await s.schedule()`` 表达式的类型为 ``void``
+
+.. code-block:: cpp
+
+   cppcoro::task<> f(Scheduler& scheduler)
+   {
+   // 协程的执行最初在调用者的执行上下文中执行
+
+   // 暂停当前协程并调度其在 scheduler 的运行上下文中恢复
+   co_await scheduler.schedule();
+
+   // 现在协程运行在 scheduler 的运行上下文中
+   }
+
 DelayedScheduler
 ========================================
+
+概念 ``DelayedScheduler`` 允许协程自己调度自己在延迟一段时间后到调度器的运行上下文中。
+
+.. code-block:: cpp
+
+   concept DelayedScheduler : Scheduler
+   {
+   template<typename REP, typename RATIO>
+   Awaitable<void> schedule_after(std::chrono::duration<REP, RATIO> delay);
+
+   template<typename REP, typename RATIO>
+   Awaitable<void> schedule_after(
+      std::chrono::duration<REP, RATIO> delay,
+      cppcoro::cancellation_token cancellationToken);
+   }
+
+假设有类型 ``S`` 实现了 ``DelayedScheduler`` 概念，且有实例 ``s`` 。则：
+
+- ``s.schedule_after(delay)`` 方法返回一个 Awaitable 类型。因此 ``co_await s.schedule_after(delay)`` 将会无条件暂停当前协程一段时间然后调度其在与 ``s`` 相关的协程内恢复。
+- ``co_await s.schedule_after(delay)`` 表达式的类型为 ``void``
 
 构建
 ****************************************
