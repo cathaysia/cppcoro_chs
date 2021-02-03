@@ -2158,12 +2158,199 @@ API 摘要：
    sync_wait(makeTask()) == "foo";
    }
 
-when_all_ready()
-========================================
 when_all()
 ========================================
+
+``when_all()`` 可以用于创建一个新的 Awaitable 对象，当其被 ``co_await`` 时，将会并发 ``co_await`` 所有输入的任务并返回一个他们结果的集合。
+
+当返回的 Awaitable 对象被  ``co_await``  时，它将在当前线程上 ``co_await`` 每个输入的任务。一旦第一个任务完成，就会启动第二个任务，依此类推。这些操作并发地执行，直到它们全部运行完成。
+
+一旦所有任务 ``co_await`` 操作都完成，就会从每个单独的结果构建一个结果集。任何输入任务抛出异常，或者结果集的构造抛出了异常，那么该异常将被返回的 Awaitable 对象的 ``co_await`` 表达式重新抛出。
+
+若多个 ``co_await`` 由于异常而被终止，其中之一将从 ``co_await when_all()`` 传播出去，而其他异常将被忽略。具体是那个异常是在运行时决定。
+
+如果要知道哪个任务 ``co_await`` 操作失败，或者即使其中一些操作失败也希望继续获取其他操作的结果，那么您应该使用 ``when_all_ready()`` 。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/when_all.hpp>
+   namespace cppcoro
+   {
+   // 变参版本
+   //
+   // 注意：如果一些任务 `co_await` 表达式结果类型为 void，则构造
+   // 的结果集中，其结果将使用一个空的结构体 detail::void_value 进行填充
+   template<typename... AWAITABLES>
+   auto when_all(AWAITABLES&&... awaitables)
+      -> Awaitable<std::tuple<typename awaitable_traits<AWAITABLES>::await_result_t...>>;
+
+   // 重载版本 vector<Awaitable<void>>.
+   template<
+      typename AWAITABLE,
+      typename RESULT = typename awaitable_traits<AWAITABLE>::await_result_t,
+      std::enable_if_t<std::is_void_v<RESULT>, int> = 0>
+   auto when_all(std::vector<AWAITABLE> awaitables)
+      -> Awaitable<void>;
+
+   // 重载 vector<Awaitable<NonVoid>> ，在被等待时产生一个值
+   template<
+      typename AWAITABLE,
+      typename RESULT = typename awaitable_traits<AWAITABLE>::await_result_t,
+      std::enable_if_t<!std::is_void_v<RESULT>, int> = 0>
+   auto when_all(std::vector<AWAITABLE> awaitables)
+      -> Awaitable<std::vector<std::conditional_t<
+            std::is_lvalue_reference_v<RESULT>,
+            std::reference_wrapper<std::remove_reference_t<RESULT>>,
+            std::remove_reference_t<RESULT>>>>;
+   }
+
+例子：
+
+.. code-block:: cpp
+
+   task<A> get_a();
+   task<B> get_b();
+
+   task<> example1()
+   {
+   // 并发运行 get_a() 和 get_b()
+   // 产生的结果类型为 std::tuple<A, B>，其可使用结构化绑定进行解包。
+   auto [a, b] = co_await when_all(get_a(), get_b());
+
+   // 使用 a, b
+   }
+
+   task<std::string> get_record(int id);
+
+   task<> example2()
+   {
+   std::vector<task<std::string>> tasks;
+   for (int i = 0; i < 1000; ++i)
+   {
+      tasks.emplace_back(get_record(i));
+   }
+
+   // 并发运行所有的 get_record() 任务
+   // 如果有任务发生了异常，那么在它们都完成时，将会将异常从
+   //  co_await 表达式中传播出去
+   std::vector<std::string> records = co_await when_all(std::move(tasks));
+
+   // 处理结果集
+   for (int i = 0; i < 1000; ++i)
+   {
+      std::cout << i << " = " << records[i] << std::endl;
+   }
+   }
+
+when_all_ready()
+========================================
+
+``when_all_ready()`` 可以用于创建一个新的 Awaitable 对象，其将会在所有输入的 Awaitable 对象完成后才完成
+
+输入任务可以是 Awaitable 的任何类型
+
+当返回的 Awaitable 对象 [#]_ 被 ``co_await`` ，其将按照线程传入 ``when_all_ready()`` 的顺序依次 ``co_await`` 线程。如果这些任务不能同步完成，那么它们将并发执行。
+
+一旦所有输入的任务都完成，则返回的 Awaitable 对象将会恢复挂起的协程。挂起的协程将在所有输入任务都完成后才被恢复。
+
+返回的 Awaitable 保证不抛出异常，即使输入的任务可能抛出异常。
+
+注意：调用 ``when_all_ready()`` 可能由于内存不足而抛出 ``std::bad_alloc`` 异常。而且还可能由于调用输入任务的拷贝/移动构造函数而抛出异常。
+
+``co_await`` 返回的 Awaitable 对象的结果是返回一个 ``when_all_task<RESULT>`` 类型的 ``std::tuple`` 或 ``std::vector>`` 。 这些对象允许您通过调用 ``hen_all_task<RESULT>::result()`` 分别获得每个输入 Awaitable 对象的结果(或异常)。这允许调用方同时等待多个可等待对象，并在它们完成时进行同步，同时仍保留随后检查每个 ``co_await`` 操作的结果是否成功的能力。
+
+这与 ``when_all()`` 任何单个 ``co_await`` 操作的失败都会导致整体操作失败不同。这意味着您无法确定哪个组件 ``co_await`` 操作失败，并且还使您无法获取其他 ``co_await`` 操作的结果。
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/when_all_ready.hpp>
+   namespace cppcoro
+   {
+   // 同时 await 多个 Awaitable 对象.
+   //
+   // 返回一个 Awaitable 对象，当其被 co_await 时，
+   // 将会轮流等待所有输入的任务。当所有输入任务都完成后，
+   // 唤醒挂起的协程。
+   //
+   // co_await 返回的 Awaitable 对象，其结果是一个类型为
+   //  detail::when_all_task<T> 的 std::tuple。类型 T
+   // 是各个输入任务被 co_await 结果的类型。
+   //
+   // 输入的任务必须为 Awaitable 类型。当输入为右值时必须可移动，当输入为左值是必须可拷贝。 co_await 表达式将会运行在拷贝的右值上
+   template<typename... AWAITABLES>
+   auto when_all_ready(AWAITABLES&&... awaitables)
+      -> Awaitable<std::tuple<detail::when_all_task<typename awaitable_traits<AWAITABLES>::await_result_t>...>>;
+
+   // 并发等待输入任务队列中的任务
+   template<
+      typename AWAITABLE,
+      typename RESULT = typename awaitable_traits<AWAITABLE>::await_result_t>
+   auto when_all_ready(std::vector<AWAITABLE> awaitables)
+      -> Awaitable<std::vector<detail::when_all_task<RESULT>>>;
+   }
+
+例子：
+
+.. code-block:: cpp
+
+   task<std::string> get_record(int id);
+
+   task<> example1()
+   {
+   // 并发运行 3 个 get_record() 并等待它们完成
+   // 返回一个 std::tuple 类型，其可使用结构化绑定表达式进行解包。
+   auto [task1, task2, task3] = co_await when_all_ready(
+      get_record(123),
+      get_record(456),
+      get_record(789));
+
+   // 对每个任务进行解包
+   std::string& record1 = task1.result();
+   std::string& record2 = task2.result();
+   std::string& record3 = task3.result();
+
+   // 使用 records....
+   }
+
+   task<> example2()
+   {
+   // 创建输入的任务，但是还不开始执行
+   std::vector<task<std::string>> tasks;
+   for (int i = 0; i < 1000; ++i)
+   {
+      tasks.emplace_back(get_record(i));
+   }
+
+   // 同时运行所有的任务
+   std::vector<detail::when_all_task<std::string>> resultTasks =
+      co_await when_all_ready(std::move(tasks));
+
+   // 一旦任务都完成，对其结果进行解包
+   for (int i = 0; i < 1000; ++i)
+   {
+      try
+      {
+         std::string& record = tasks[i].result();
+         std::cout << i << " = " << record << std::endl;
+      }
+      catch (const std::exception& ex)
+      {
+         std::cout << i << " : " << ex.what() << std::endl;
+      }
+   }
+   }
+
+.. [#] 译者注：这里“返回的 Awaitable 对象”指的应当是 ``when_all_ready()`` 返回的 Awaitable 对象。
+
 fmap()
 ========================================
+
+
+
 schedule_on()
 ========================================
 resume_on()
