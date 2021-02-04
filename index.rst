@@ -2349,13 +2349,209 @@ API 摘要：
 fmap()
 ========================================
 
+``fmap()`` 用于将指定函数应用于容器内的元素，返回结果是一个新的、包含应用结果容器。
 
+``fmap()`` 函数可以将一个函数应用于 ``generator<T>`` 、 ``recursive_generator<T>`` 和 `` async_generator<T>`` 的值以及任何支持 ``Awaitable`` 概念的值(例如: ``task<T>`` )。
+
+每一种类型都为 ``fmap()`` 提供了带两个参数的重载：要应用的函数和被应用的容器。有关支持的 ``fmap()`` 重载，请参见文档。
+
+例如， ``fmap()`` 函数可用于将函数应用于 ``task<T>`` 的结果，生成一个新的 ``task<U>`` ，该任务将使用函数的返回值来完成。
+
+.. code-block:: cpp
+
+   // 使用一个函数来将类型 A 转换到类型 B
+   B a_to_b(A value);
+
+   // 一个生成类型为 A 的task
+   cppcoro::task<A> get_an_a();
+
+   // 我们可以使用 fmap() 函数将一个函数应用到 task 上，并获得新 task 的结果
+   cppcoro::task<B> bTask = fmap(a_to_b, get_an_a());
+
+   // 另一种语法是使用管道表示法
+   cppcoro::task<B> bTask = get_an_a() | cppcoro::fmap(a_to_b);
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/fmap.hpp>
+   namespace cppcoro
+   {
+   template<typename FUNC>
+   struct fmap_transform
+   {
+      fmap_transform(FUNC&& func) noexcept(std::is_nothrow_move_constructible_v<FUNC>);
+      FUNC func;
+   };
+
+   // 类型推导的构造函数，以便于使用 operator| 操作
+   template<typename FUNC>
+   fmap_transform<FUNC> fmap(FUNC&& func);
+
+   // operator| 重载以便于为 fmap() 提供类似管道的语法糖
+   // 比如这种表达式：
+   //   <value-expr> | cppcoro::fmap(<func-expr>)
+   // 等价于：
+   //   fmap(<func-expr>, <value-expr>)
+
+   template<typename T, typename FUNC>
+   decltype(auto) operator|(T&& value, fmap_transform<FUNC>&& transform);
+
+   template<typename T, typename FUNC>
+   decltype(auto) operator|(T&& value, fmap_transform<FUNC>& transform);
+
+   template<typename T, typename FUNC>
+   decltype(auto) operator|(T&& value, const fmap_transform<FUNC>& transform);
+
+   // 所有 Awaitable 类型的通用重载
+   //
+   // 在被 co_await 时返回一个 Awaitable 对象。co_await 返回的对象并在其上应用指定的函数
+   // 类似于 'std::invoke(func, co_await awaitable)'
+   //
+   // 若 'co_await awaitable' 表达式的类型为 'void' 则 co_await 
+   // 返回的 Awaitable 等价于 'co_await awaitable, func()'
+   template<
+      typename FUNC,
+      typename AWAITABLE,
+      std::enable_if_t<is_awaitable_v<AWAITABLE>, int> = 0>
+   auto fmap(FUNC&& func, AWAITABLE&& awaitable)
+      -> Awaitable<std::invoke_result_t<FUNC, typename awaitable_traits<AWAITABLE>::await_result_t>>;
+   }
+
+``fmap()`` 函数被设计成通过 :abbr:`依赖于参数的查找 (Argument-Dependent Lookup, ADL)` 来查找正确的重载，因此通常调用它时不应该使用 ``cppcoro::`` 前缀。
 
 schedule_on()
 ========================================
+
+``schedule_on()`` 函数可用于更改给定的 Awaitable 或开始执行的异步生成器的执行上下文
+
+当应用到异步生成器时，它还会影响在 ``co_yield`` 语句之后它将在哪个执行上下文上继续执行
+
+请注意， ``schedule_on`` 上的调度并不指定 Awaitable 或异步生成器完成或产生结果的线程，这取决于 Awaitable 或生成器的实现。
+
+请参阅 ``resume_on()`` 如何控制任务在哪个线程上完成。
+
+例子：
+
+.. code-block:: cpp
+
+   task<int> get_value();
+   io_service ioSvc;
+
+   task<> example()
+   {
+   // 在当前线程上开始执行 get_value()
+   int a = co_await get_value();
+
+   // 在 ioSvc 的线程上执行 get_value()
+   int b = co_await schedule_on(ioSvc, get_value());
+   }
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/schedule_on.hpp>
+   namespace cppcoro
+   {
+   // 返回一个 task ，其结果与 't' 相同，但是确保 't' 在被 co_await 时
+   // 在与调度器相关联的线程上执行。task 的结果将在 't' 完成的线程上完成。
+   template<typename SCHEDULER, typename AWAITABLE>
+   auto schedule_on(SCHEDULER& scheduler, AWAITABLE awaitable)
+      -> Awaitable<typename awaitable_traits<AWAITABLE>::await_result_t>;
+
+   // 返回一个生成器，其序列与 'source' 相同，但是确保启动的协程在与调度器
+   // 相关联的线程上执行。在被 'co_yield' 后，在与调度器关联的线程上恢复
+   template<typename SCHEDULER, typename T>
+   async_generator<T> schedule_on(SCHEDULER& scheduler, async_generator<T> source);
+
+   template<typename SCHEDULER>
+   struct schedule_on_transform
+   {
+      explicit schedule_on_transform(SCHEDULER& scheduler) noexcept;
+      SCHEDULER& scheduler;
+   };
+
+   template<typename SCHEDULER>
+   schedule_on_transform<SCHEDULER> schedule_on(SCHEDULER& scheduler) noexcept;
+
+   template<typename T, typename SCHEDULER>
+   decltype(auto) operator|(T&& value, schedule_on_transform<SCHEDULER> transform);
+   }
+
 resume_on()
 ========================================
 
+``resume_on()`` 函数可用于控制恢复挂起协程的执行上下文。当应用到异步生成器时，它控制 ``co_await g.begin()`` 和 ``co_await ++it`` 操作在哪个执行上下文上恢复挂起的协程。
+
+通常，等待 Awaitable 的协程(比如：一个 task )或异步生成器将在该操作完成的任何线程上恢复执行。在某些情况下，这可能不是您想要继续执行的线程。在这些情况下，您可以使用 ``resume_on()`` 函数创建一个新的 Awaitable 或生成器，它将在与指定调度程序关联的线程上恢复执行。
+
+``resume_on()`` 函数可以用作返回新的 Awaitable/Generator 的普通函数也可以在管道语法中使用它。
+
+例如：
+
+.. code-block:: cpp
+
+   task<record> load_record(int id);
+
+   ui_thread_scheduler uiThreadScheduler;
+
+   task<> example()
+   {
+   // 这将在当前线程上启动 load_record()
+   // 然后当 load_record() 完成时（可能是一个 I/O 线程）
+   // 它将被重新调度到线程池并调用 to_json
+   // 一旦 to_json 完成，它将在被恢复前被调度到 ui 线程并返回 json 字符串
+   task<std::string> jsonTask =
+      load_record(123)
+      | cppcoro::resume_on(threadpool::default())
+      | cppcoro::fmap(to_json)
+      | cppcoro::resume_on(uiThreadScheduler);
+
+   // 此处，我们所做的就是创建一个 task 的流水线
+   // 任务不会立即开启
+
+   // Await 结果。开始 task 的流水线
+   std::string jsonText = co_await jsonTask;
+
+   // 保证在 ui 线程上执行
+
+   someUiControl.set_text(jsonText);
+   }
+
+API 摘要：
+
+.. code-block:: cpp
+
+   // <cppcoro/resume_on.hpp>
+   namespace cppcoro
+   {
+   template<typename SCHEDULER, typename AWAITABLE>
+   auto resume_on(SCHEDULER& scheduler, AWAITABLE awaitable)
+      -> Awaitable<typename awaitable_traits<AWAITABLE>::await_traits_t>;
+
+   template<typename SCHEDULER, typename T>
+   async_generator<T> resume_on(SCHEDULER& scheduler, async_generator<T> source);
+
+   template<typename SCHEDULER>
+   struct resume_on_transform
+   {
+      explicit resume_on_transform(SCHEDULER& scheduler) noexcept;
+      SCHEDULER& scheduler;
+   };
+
+   // 构建一个转发对象以便于能对源对象使用管道符（比如： operator| ）
+   template<typename SCHEDULER>
+   resume_on_transform<SCHEDULER> resume_on(SCHEDULER& scheduler) noexcept;
+
+   // 等价于 'resume_on(transform.scheduler, std::forward<T>(value))'
+   template<typename T, typename SCHEDULER>
+   decltype(auto) operator|(T&& value, resume_on_transform<SCHEDULER> transform)
+   {
+      return resume_on(transform.scheduler, std::forward<T>(value));
+   }
+   }
 
 元函数
 ****************************************
@@ -2433,7 +2629,7 @@ Awaiter<T>
 Scheduler
 ========================================
 
-概念 ``Scheduler`` 改变了允许在一些运行上下文中调度协程的运行。
+概念 ``Scheduler`` 改变了允许在一些执行上下文中调度协程的运行。
 
 .. code-block:: cpp
 
@@ -2453,16 +2649,16 @@ Scheduler
    {
    // 协程的执行最初在调用者的执行上下文中执行
 
-   // 暂停当前协程并调度其在 scheduler 的运行上下文中恢复
+   // 暂停当前协程并调度其在 scheduler 的执行上下文中恢复
    co_await scheduler.schedule();
 
-   // 现在协程运行在 scheduler 的运行上下文中
+   // 现在协程运行在 scheduler 的执行上下文中
    }
 
 DelayedScheduler
 ========================================
 
-概念 ``DelayedScheduler`` 允许协程自己调度自己在延迟一段时间后到调度器的运行上下文中。
+概念 ``DelayedScheduler`` 允许协程自己调度自己在延迟一段时间后到调度器的执行上下文中。
 
 .. code-block:: cpp
 
