@@ -3017,11 +3017,4 @@ GitHub 的 issues 是支持、bug 报告和新特性请求的主要方式。
 
 在同意 MIT 许可的情况下，欢迎任何贡献和 Pull-Requests 。
 
-如果你遇到 C++ 协程的问题，一般你可以在 ``Cpplang Slack <https://cpplang.slack.com/>`_ 组的 ``#coroutines`` 频道中获得帮助。
-
-索引和表
-****************************************
-
-* :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`
+如果你遇到 C++ 协程的问题，一般你可以在 `Cpplang Slack <https://cpplang.slack.com/>`_ 组的 ``#coroutines`` 频道中获得帮助。
